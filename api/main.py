@@ -173,7 +173,7 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 # =========================
-# Webhook (Ruta Principal de ElevenLabs)
+# Webhook
 # =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(
@@ -241,99 +241,3 @@ def envcheck():
         "ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC"
     ]
     return {k: os.getenv(k) for k in keys}
-
-
-# =========================
-# LÓGICA DE AGENDAMIENTO (Ruta de Prueba/Integración Final)
-# =========================
-# Las funciones de servicio deben estar disponibles en el entorno de Render
-from services.calendar_checker import check_availability
-from services.calendar_service import book_appointment 
-
-# Definición de la estructura de datos que esperamos para agendar
-class CitaPayload(dict):
-    """
-    Clase simple para validar la estructura del JSON de entrada.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not all(k in self for k in ["cliente_nombre", "fecha", "hora"]):
-            raise ValueError("Payload missing required keys: cliente_nombre, fecha, hora")
-
-@app.post("/agendar_cita")
-async def agendar_cita_endpoint(request: Request):
-    """
-    Endpoint que coordina la verificación de disponibilidad y la creación del evento.
-    Simula la llamada final que haría la lógica de 'workflows/processor.py'.
-    """
-    try:
-        # 1. Cargar y validar el JSON de la solicitud (Payload)
-        try:
-            payload = CitaPayload(await request.json())
-        except ValueError as ve:
-            raise HTTPException(status_code=400, detail=str(ve))
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON format.")
-
-        cliente_nombre = payload['cliente_nombre']
-        fecha_str = payload['fecha']
-        hora_str = payload['hora']
-        
-        # 2. Verificar Disponibilidad (Usando services/calendar_checker.py)
-        print(f"🔄 Verificando disponibilidad para {cliente_nombre} en {fecha_str} a las {hora_str}...")
-        
-        is_available = check_availability(fecha_str, hora_str)
-
-        if not is_available:
-            return JSONResponse(
-                status_code=409, # 409 Conflict - Recurso no disponible
-                content={
-                    "status": "failure",
-                    "message": f"Horario no disponible: {fecha_str} a las {hora_str}.",
-                }
-            )
-
-        # 3. Agendar Cita y Guardar Datos (Usando services/calendar_service.py - Webhook de Apps Script)
-        print("✅ Disponible. Procediendo a agendar el evento mediante Apps Script Webhook...")
-        
-        # book_appointment requiere 6 campos, usamos placeholders para los no provistos en la prueba.
-        book_result = book_appointment(
-            nombre=cliente_nombre, 
-            apellido="N/A",         # Placeholder para el test
-            telefono="N/A",         # Placeholder para el test
-            email="test@webhook.com", # Placeholder para el test
-            fechaCita=fecha_str, 
-            horaCita=hora_str
-        )
-        
-        # 4. Analizar la Respuesta del Webhook de Apps Script
-        if book_result.get('status') == 'success':
-            success_message = f"Cita agendada con éxito para {cliente_nombre}. Mensaje de Apps Script: {book_result.get('message', 'Éxito.')}"
-            print(f"🎉 Éxito: {success_message}")
-            
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "status": "success",
-                    "message": success_message,
-                    "webhook_status": "Llamada a Apps Script exitosa",
-                    "sheets_status": "Datos y cita guardados a través del Webhook de Apps Script."
-                }
-            )
-        else:
-             # Si el Apps Script falla o devuelve un error
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "status": "failure",
-                    "message": "Fallo al agendar la cita en Google Calendar/Sheets a través del Webhook.",
-                    "details": book_result.get('message', 'Error desconocido del Webhook.')
-                }
-            )
-
-    except HTTPException as http_err:
-        return JSONResponse(status_code=http_err.status_code, content={"error": http_err.detail})
-    except Exception as e:
-        print(f"💥 Error grave en /agendar_cita: {e}")
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
