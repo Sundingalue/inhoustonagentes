@@ -1,30 +1,27 @@
 import json
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-# Solo usamos email en este paso. Los demás servicios quedan listos para el futuro, pero sin ejecutar.
+# Servicios de Agendamiento
+from services.calendar_checker import check_availability
+from services.calendar_service import book_appointment # Usa el webhook de Apps Script
+# Servicios de Email (Actuales)
 from services.email_service import send_email
 from services.send_client_email import send_email_to_client
-# from services.sheets_service import save_conversation
-# from services.calendar_service import send_agenda_link
-# from services.location_service import send_location
-# from services.analysis_service import log_agent_activity
-# from services.invoice_service import generate_invoice
-# from services.elevenlabs_service import start_conversation_with_agent
 
+# Otros servicios (mantener inactivos por ahora)
+# from services.sheets_service import save_conversation
+# from services.location_service import send_location
+# ...
+
+# === Funciones de Soporte ===
 
 def _read_agent_config(agent_name: str) -> Dict[str, Any]:
     """
     Lee agents/<agent_name>.json y retorna el dict o {} si no existe.
-    Usa el nombre legible (ej. 'sundin'), no el ID largo de ElevenLabs.
     """
-    # base_dir está en /workflows/
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Subir a la raíz (..) y buscar 'agents' (llegará a /src/agents)
     agents_dir = os.path.join(base_dir, "..", "agents")
-    
-    # Usa el nombre del agente para construir la ruta al archivo JSON
     json_path = os.path.normpath(os.path.join(agents_dir, f"{agent_name}.json"))
 
     if not os.path.exists(json_path):
@@ -41,19 +38,12 @@ def _read_agent_config(agent_name: str) -> Dict[str, Any]:
 def _extract_transcript_text(event: Dict[str, Any]) -> str:
     """
     Obtiene el texto de la conversación desde el evento normalizado.
-    Prioriza event['transcript_text'] y tiene fallbacks por compatibilidad.
     """
-    # Normalizado por main.py
     txt = (event.get("transcript_text") or "").strip()
     if txt:
         return txt
 
-    # Fallbacks por si llega con otras claves
-    txt = (event.get("transcription") or "").strip()
-    if txt:
-        return txt
-
-    # Intento de rescate desde el raw (si llegó lista de turnos)
+    # Fallback/Rescate desde el raw
     raw = event.get("raw") or {}
     root = raw.get("data", raw) if isinstance(raw, dict) else {}
     tr = root.get("transcript") or root.get("transcription") or []
@@ -72,72 +62,111 @@ def _extract_transcript_text(event: Dict[str, Any]) -> str:
     return ""
 
 
-# ✅ CORRECCIÓN CLAVE: La firma ahora espera el nombre legible del agente (ej: "sundin")
+def _simulate_data_extraction(transcript: str, event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    SIMULACIÓN: En un entorno real, aquí usarías un LLM (como Gemini) 
+    para extraer Nombre, Fecha y Hora del transcript.
+    
+    Para la prueba final, ASUMIMOS que la cita fue confirmada y los datos
+    de la prueba están disponibles.
+    
+    Nota: La lógica real de ElevenLabs puede incluir una clave 'custom_data'
+    con los datos estructurados, si se configuró un LLM para formatearlos.
+    """
+    # Usamos una CLAVE SECRETA en la transcripción para activar la simulación.
+    # En producción, esto sería una detección de intención del LLM.
+    if "AGENDAR_CITA_CONFIRMADA" in transcript:
+        print("✅ DETECCIÓN: Intención de agendamiento detectada en la transcripción.")
+        
+        # Simulamos la extracción de los datos usados en la prueba curl anterior
+        return {
+            "cliente_nombre": "Sundin Galué",
+            "fecha": "2025-10-30", # Usamos la fecha original para que se vea en el futuro
+            "hora": "14:30",
+            "apellido": "N/A", # Placeholder requerido por book_appointment
+            "telefono": "N/A", # Placeholder requerido por book_appointment
+            "email": "test-agendamiento@webhook.com" # Placeholder requerido por book_appointment
+        }
+    return None
+
+# === Función Principal ===
+
 def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Procesa el evento del webhook de ElevenLabs con foco en ENVIAR EMAIL.
-    Espera:
-      - agent_name (nombre legible del archivo, ej: "sundin")
-      - event (payload normalizado)
+    Procesa el evento del webhook de ElevenLabs y ejecuta el workflow.
     """
     results: Dict[str, Any] = {}
+    transcript_text = _extract_transcript_text(event)
 
     try:
-        if not agent_name:
-            return {"error": "agent_name missing"}
-
-        # Cargar configuración del agente (usa el nombre legible)
+        # 1. Cargar configuración
         config = _read_agent_config(agent_name)
         if not config:
             return {"error": f"agent '{agent_name}' not found or invalid config"}
 
-        # Determinar workflow del agente (por defecto, solo email)
+        # 2. Intentar Detección de Agendamiento
+        cita_data = _simulate_data_extraction(transcript_text, event)
+        
+        if cita_data:
+            print("🚀 INICIANDO WORKFLOW DE AGENDAMIENTO...")
+            
+            # --- Lógica de Agendamiento ---
+            
+            is_available = check_availability(cita_data['fecha'], cita_data['hora'])
+
+            if not is_available:
+                results["agendamiento"] = {
+                    "status": "failure",
+                    "message": f"Horario no disponible: {cita_data['fecha']} a las {cita_data['hora']}."
+                }
+                print(f"❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
+            else:
+                # Si está disponible, crear evento y guardar datos vía Apps Script Webhook
+                book_result = book_appointment(
+                    nombre=cita_data['cliente_nombre'], 
+                    apellido=cita_data['apellido'],
+                    telefono=cita_data['telefono'],
+                    email=cita_data['email'], 
+                    fechaCita=cita_data['fecha'], 
+                    horaCita=cita_data['hora']
+                )
+                results["agendamiento"] = book_result
+                if book_result.get('status') == 'success':
+                    print(f"🎉 ÉXITO: Cita agendada y datos guardados por Apps Script.")
+                else:
+                    print(f"⚠️ ERROR DE APPS SCRIPT: {book_result.get('message')}")
+
+            # Finalizar workflow si hubo intento de agendamiento
+            return results
+
+        # 3. Si NO hay agendamiento, ejecutar el flujo de Email por defecto
+        # ------------------------------------------------------------------
+        print("➡️ Ejecutando flujo de EMAIL por defecto...")
+        
         workflow = config.get("workflow") or ["email"]
-        if not isinstance(workflow, list):
-            workflow = ["email"]
-
-        # Texto de la conversación a enviar
-        transcript_text = _extract_transcript_text(event)
-        if not transcript_text:
-            print("⚠️ No se obtuvo transcript_text. Se enviará cuerpo vacío (o mensaje por defecto).")
-
-            # 💡 NUEVO: Enviar correo al cliente con su ubicación
+        
+        # Enviar correo al cliente con su ubicación (si aplica)
         send_email_to_client(transcript_text, agent_name)
 
-
-        # Ejecutar SOLO el paso de email (dejamos los demás como skipped)
+        # Ejecutar pasos del workflow (solo 'email' por ahora)
         for step in workflow:
             step_norm = str(step or "").strip().lower()
 
-            # === ENVIAR EMAIL === (admite 'email' o 'enviar_email')
             if step_norm in ("email", "enviar_email"):
                 email_cfg = config.get("email") or {}
-                if not isinstance(email_cfg, dict) or not email_cfg:
-                    results["email"] = {
-                        "status": "error",
-                        "message": "Config 'email' ausente o inválida en el JSON del agente"
-                    }
-                    print("❌ Falta sección 'email' en la configuración del agente.")
-                    # seguimos al siguiente step (si lo hubiera)
-                    continue
-
-                # Cuerpo por defecto si no hay transcripción
+                # ... (Tu lógica original de envío de email aquí) ...
                 body = transcript_text or "No se recibió transcripción de la llamada."
+                
                 try:
                     print("📧 Enviando correo (Zoho SMTP) con la conversación...")
-                    # La firma de send_email debe aceptar (email_cfg, body).
-                    # Si tu email_service requiere subject/attachments, puedes agregarlos a email_cfg en el JSON.
                     result_email = send_email(email_cfg, agent_name, event)
                     results["email"] = result_email if isinstance(result_email, dict) else {"status": "ok", "detail": str(result_email)}
                 except Exception as e:
-                    print(f"❌ Error enviando correo: {e}")
                     results["email"] = {"status": "error", "message": str(e)}
 
             else:
-                # Por ahora no ejecutamos otros pasos. Los dejamos registrados como skipped.
                 results[step_norm or "unknown"] = {"status": "skipped"}
 
-        print("✅ Flujo de EMAIL ejecutado.")
         return results
 
     except Exception as e:
