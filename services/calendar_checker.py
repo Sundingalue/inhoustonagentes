@@ -1,21 +1,16 @@
 # service_calendar_checker.py: Lógica para verificar la disponibilidad en Google Calendar
-# Usando la autenticación de Cuenta de Servicio (Service Account)
+# Usando la autenticación de Variables de Entorno (Service Account JSON)
 
 import json
+import os 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 import pytz
-import os 
 
-# *** CONFIGURACIÓN CRÍTICA DE RUTA ***
-# ✅ CORRECCIÓN FINAL: Subimos solo un nivel (de /src/services/ a /src/) y apuntamos a /src/keys/
-# os.path.dirname(__file__) es /src/services/
-# os.path.dirname(os.path.abspath(__file__)) es /src/services/
-# os.path.dirname(os.path.dirname(os.path.abspath(__file__))) es la raíz del proyecto
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # <-- La carpeta 'services'
-PROJECT_ROOT = os.path.dirname(BASE_DIR) # <-- La carpeta '/src/'
-SERVICE_ACCOUNT_FILE = os.path.join(PROJECT_ROOT, 'keys', 'service_key.json')
+# *** CONFIGURACIÓN CRÍTICA ***
+# ⚠️ CAMBIO CLAVE: Leer la clave JSON completa desde una variable de entorno de Render.
+SERVICE_ACCOUNT_JSON_ENV_VAR = 'GOOGLE_CALENDAR_SERVICE_ACCOUNT_JSON'
 
 # Ámbito de solo lectura de disponibilidad (Free/Busy)
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
@@ -28,20 +23,30 @@ TIMEZONE = 'America/Chicago'
 
 def get_calendar_service():
     """
-    Inicializa y retorna el objeto de servicio de Google Calendar.
+    Inicializa y retorna el objeto de servicio de Google Calendar leyendo la clave de ENV VAR.
     """
-    print(f"🔄 Intentando cargar credenciales desde la ruta: {SERVICE_ACCOUNT_FILE}")
+    # Esta línea confirma que el código es el nuevo.
+    print(f"🔄 Intentando cargar credenciales desde la variable de entorno: {SERVICE_ACCOUNT_JSON_ENV_VAR}") 
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_FILE, scopes=SCOPES
-        )
-        print("✅ Credenciales de Cuenta de Servicio cargadas con éxito.")
+        # 1. Obtener la cadena JSON completa de la variable de entorno
+        json_key_string = os.getenv(SERVICE_ACCOUNT_JSON_ENV_VAR)
+        
+        if not json_key_string:
+            # Esto debería ser imposible si la variable existe en Render
+            raise ValueError(f"❌ Falta la variable de entorno: {SERVICE_ACCOUNT_JSON_ENV_VAR}")
+        
+        # 2. Cargar la cadena JSON en un diccionario
+        info = json.loads(json_key_string)
+        
+        # 3. Crear las credenciales a partir del diccionario
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        
+        print("✅ Credenciales de Cuenta de Servicio cargadas con éxito desde ENV VAR.")
         return build('calendar', 'v3', credentials=creds)
-    except FileNotFoundError:
-        print(f"❌ ¡ERROR CRÍTICO de autenticación! Archivo no encontrado. Asegúrate de que 'keys/service_key.json' esté en el repositorio.")
-        raise
+
     except Exception as e:
-        print(f"❌ Error al inicializar servicio de calendario: {e}")
+        print(f"❌ ¡ERROR CRÍTICO de autenticación! Falla al procesar la clave de servicio.")
+        print(f"Detalle: {e}")
         raise
 
 def check_availability(date_str: str, time_str: str) -> bool:
@@ -95,5 +100,3 @@ def check_availability(date_str: str, time_str: str) -> bool:
     except Exception as e:
         print(f"❌ Error al consultar Free/Busy: {e}")
         return False
-
-# --- FUNCIÓN DE PRUEBA (OMITIDA) ---
