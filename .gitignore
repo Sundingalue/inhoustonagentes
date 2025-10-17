@@ -1,0 +1,19 @@
+# Entornos virtuales
+venv/
+.env
+
+# Archivos del sistema
+__pycache__/
+*.pyc
+.DS_Store
+
+# Archivos temporales
+*.log
+*.tmp
+
+# Otros
+secrets.json
+# Claves privadas
+keys/google_service_account.json
+keys/service_key.json
+

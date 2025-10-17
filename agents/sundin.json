@@ -1,0 +1,28 @@
+{
+  "agent_id": "sundin",
+  "email": {
+    "to": "sundingaluepaz@gmail.com",
+    "subject": "Nueva conversación recibida",
+    "from": "info@inhoustontexas.us"
+  },
+  
+  "link_agenda": "https://calendly.com/sundingalue/45",
+  
+  "location": {
+    "address": "1325 Main St Suite 203, Katy, TX 77494",
+    "maps_url": "https://maps.app.goo.gl/saGKjQADLAjbHuyZ9"
+  },
+  "invoice": true,
+  "elevenlabs_agent_id": "agent_8301k6n79bmvekcbx7vqby7asrze",
+  "sheet_id": "1mdnuCn3NXC84dGrD0ellxubcJ02hg7huInq9aKltPvk",
+
+  "workflow": [
+    "guardar_en_sheets",
+    "enviar_email",
+    "enviar_agenda",
+    "enviar_ubicacion",
+    "analizar",
+    "facturar",
+    "iniciar_conversacion"
+  ]
+}
