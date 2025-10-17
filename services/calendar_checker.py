@@ -6,22 +6,25 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 import pytz
+import os # <-- ¡NECESARIO AÑADIR ESTA LÍNEA!
 
 # *** CONFIGURACIÓN CRÍTICA ***
 # NOTA: Esta RUTA DE ARCHIVO debe coincidir EXACTAMENTE con el archivo que tienes en tu carpeta 'keys/'.
-# Basado en tu última captura, el nombre es 'service_key.json'.
-SERVICE_ACCOUNT_FILE = 'keys/service_key.json'
+# ✅ CORRECCIÓN CLAVE: Usamos os.path.join para construir la ruta absoluta desde la raíz del proyecto.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
+SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, 'keys', 'service_key.json')
+
 
 # Ámbito de solo lectura de disponibilidad (Free/Busy)
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 
 # ID del calendario que quieres verificar (usa el correo electrónico del calendario)
-# Basado en tu configuración de permisos:
 CALENDAR_ID = 'infoinhoustontexas@gmail.com' 
 
 # --- FUNCIÓN PRINCIPAL DE VERIFICACIÓN ---
 def get_calendar_service():
     """Inicializa y retorna el servicio de Google Calendar."""
+    print(f"🔄 Intentando cargar credenciales desde: {SERVICE_ACCOUNT_FILE}")
     try:
         # Carga las credenciales de la Cuenta de Servicio
         creds = service_account.Credentials.from_service_account_file(
@@ -33,9 +36,12 @@ def get_calendar_service():
         return service
     except Exception as e:
         print(f"❌ ¡ERROR CRÍTICO de autenticación de Cuenta de Servicio! Verifica la ruta y los permisos del calendario.")
+        # Mantenemos tu mensaje original y levantamos el error para que Render lo capture
         print(f"    Ruta esperada: {SERVICE_ACCOUNT_FILE}")
         print(f"    Detalle: {e}")
-        return None
+        # Es crucial levantar el error para detener el flujo si la clave falla
+        raise
+
 
 def check_availability(date_str, time_str):
     """
@@ -48,13 +54,13 @@ def check_availability(date_str, time_str):
     Returns:
         bool: True si está disponible, False si está ocupado o si hay un error.
     """
-    service = get_calendar_service()
-    if not service:
-        return False  # No se pudo obtener el servicio
+    try:
+        service = get_calendar_service()
+    except Exception:
+        # Si get_calendar_service levanta un error (clave no encontrada, etc.)
+        return False
     
     # 1. Definir la zona horaria (CRÍTICO para el calendario)
-    # Asumimos la hora de Houston (America/Chicago)
-    # ¡IMPORTANTE! Ajusta esto si el calendario de Google está en otra zona horaria.
     timezone = pytz.timezone('America/Chicago') 
 
     # 2. Convertir la fecha y hora a objetos datetime con zona horaria
@@ -66,8 +72,7 @@ def check_availability(date_str, time_str):
         # El rango de verificación es la hora de inicio + 30 minutos (tiempo típico de una cita)
         end_time_tz = start_time_tz + timedelta(minutes=30) 
 
-        # Formato ISO 8601 requerido por la API de Google (con Z para Zulu/UTC si se necesita,
-        # pero para freebusy es mejor mandar la zona horaria explícita)
+        # Formato ISO 8601 requerido por la API de Google
         time_min = start_time_tz.isoformat()
         time_max = end_time_tz.isoformat()
 
@@ -95,8 +100,10 @@ def check_availability(date_str, time_str):
         busy_slots = response['calendars'][CALENDAR_ID].get('busy', [])
         
         if busy_slots:
+            print("❌ Horario OCUPADO.")
             return False  # Ocupado
         else:
+            print("✅ Horario DISPONIBLE.")
             return True   # Disponible (Libre)
 
     except Exception as e:
