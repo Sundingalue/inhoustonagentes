@@ -1,94 +1,186 @@
-# workflows/processor.py: Lógica de flujo de trabajo que maneja los eventos del agente.
-
 import json
 import logging
-from typing import Dict, Any, List
+import os
+from typing import Dict, Any, List, Optional
+import requests
+import traceback
 
 # Importar el nuevo servicio de análisis
 from services.analysis_service import extract_customer_data 
 from services.calendar_checker import check_availability
 from services.email_service import send_email
-from services.sheets_client import write_data_to_sheets
+from services.send_client_email import send_email_to_client
+
+# ✅ CORRECCIÓN CLAVE: Usamos la función book_appointment (que hace el trabajo)
+from services.calendar_service import book_appointment 
+
+# Otros servicios (mantener inactivos por ahora)
+# from services.sheets_service import save_conversation # Ya no se usa directamente aquí
+# ...
 
 # Configuración del logger
 logger = logging.getLogger(__name__)
 
-def process_agent_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
+# Función auxiliar para leer configuración (tomada de tu código anterior)
+def _read_agent_config(agent_name: str) -> Dict[str, Any]:
+    """Lee agents/<agent_name>.json y retorna el dict o {} si no existe."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    agents_dir = os.path.join(base_dir, "..", "agents")
+    json_path = os.path.normpath(os.path.join(agents_dir, f"{agent_name}.json"))
+    if not os.path.exists(json_path):
+        print(f"❌ No se encontró la configuración del agente: {json_path}")
+        return {}
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as e:
+        print(f"❌ Error leyendo JSON del agente {agent_name}: {e}")
+        return {}
+
+# Función auxiliar para extraer transcripción (tomada de tu código corregido)
+def _extract_transcript_text(event: Dict[str, Any]) -> str:
+    """Obtiene el texto de **toda** la conversación desde el evento normalizado."""
+    txt = (event.get("transcript_text") or "").strip()
+    if txt: return txt
+    
+    raw = event.get("raw") or {}
+    root = raw.get("data", raw) if isinstance(raw, dict) else {}
+    tr = root.get("transcript") or root.get("transcription") or []
+    
+    if isinstance(tr, list):
+        try:
+            return " ".join(
+                (t.get("message", "") or "").strip()
+                for t in tr
+                if isinstance(t, dict) and t.get("message")
+            ).strip()
+        except Exception:
+            pass
+    elif isinstance(tr, str):
+        return tr.strip()
+    return ""
+
+def _map_extracted_data(extracted: Dict[str, Any]) -> Dict[str, str]:
+    """Mapea los datos de Gemini a los campos esperados por Apps Script."""
+    # Intentamos separar Nombre y Apellido si es posible, sino usamos el completo.
+    full_name = extracted.get('cliente_nombre_completo', 'N/A').split(' ', 1)
+    
+    return {
+        "nombre": full_name[0] if full_name else 'N/A',
+        "apellido": full_name[1] if len(full_name) > 1 else 'N/A',
+        "telefono": extracted.get('cliente_telefono', 'N/A'),
+        "email": extracted.get('cliente_email', 'N/A'),
+        "fechaCita": extracted.get('fecha_cita_iso', ''),
+        "horaCita": extracted.get('hora_cita_24h', ''),
+        "direccion": extracted.get('cliente_direccion', 'N/A'),
+    }
+
+
+def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Procesa un evento del agente (Webhook de ElevenLabs).
-    Detecta la intención y ejecuta el flujo de trabajo correspondiente.
+    Procesa el evento del webhook de ElevenLabs y ejecuta el workflow de agendamiento o email.
     """
-    transcript: List[Dict[str, str]] = event_data.get('transcript', [])
-    agent_id: str = event_data.get('agent_id', 'unknown')
+    results: Dict[str, Any] = {}
+    
+    # Intento de rescate del transcript si la normalización falló por alguna razón
+    transcript_text = _extract_transcript_text(event)
+    
+    # Necesitamos el payload crudo para enviárselo a la función de extracción
+    raw_transcript_list = event.get('raw', {}).get('data', {}).get('transcript', [])
+    if not raw_transcript_list:
+        # Si el transcript no está en 'raw', construimos uno simple.
+        raw_transcript_list = [{"role": "user", "message": transcript_text}]
 
-    # 1. Detección de la Intención (Frase Clave)
-    # Buscamos la frase clave de confirmación en el último mensaje del usuario
-    confirmation_message = ""
-    for item in reversed(transcript):
-        if item.get('role') == 'user' and "AGENDAR_CITA_CONFIRMADA" in item.get('message', ''):
-            confirmation_message = item['message']
-            break
 
-    if confirmation_message:
-        logger.info("DETECCIÓN: Intención de agendamiento detectada en la transcripción.")
-        
-        # --- NUEVA LÓGICA DE EXTRACCIÓN DE DATOS ---
-        logger.info("INICIANDO WORKFLOW DE AGENDAMIENTO...")
+    try:
+        # 1. Cargar configuración del agente
+        config = _read_agent_config(agent_name)
+        if not config:
+            return {"error": f"agent '{agent_name}' not found or invalid config"}
 
-        # A. EXTRAER DATOS REALES DE LA TRANSCRIPCIÓN usando Gemini
-        logger.info("1. EXTRACCIÓN DE DATOS: Llamando al LLM para obtener entidades...")
-        customer_data = extract_customer_data(transcript)
-        
-        if not customer_data or any(customer_data.get(key) in (None, '') for key in ["cliente_nombre_completo", "fecha_cita_iso", "hora_cita_24h"]):
-            logger.error("❌ AGENDAMIENTO FALLIDO: El LLM no pudo extraer los datos esenciales (Nombre, Fecha, Hora).")
-            return {"status": "error", "message": "Fallo en la extracción de datos esenciales del cliente."}
-
-        # B. PREPARAR VARIABLES A PARTIR DE LOS DATOS EXTRAÍDOS
-        cliente_nombre_completo = customer_data.get('cliente_nombre_completo', 'N/A')
-        cliente_telefono = customer_data.get('cliente_telefono', 'N/A')
-        cliente_email = customer_data.get('cliente_email', 'N/A')
-        cliente_direccion = customer_data.get('cliente_direccion', 'N/A')
-        fecha_str = customer_data.get('fecha_cita_iso')
-        hora_str = customer_data.get('hora_cita_24h')
-
-        # C. VERIFICACIÓN DE DISPONIBILIDAD
-        logger.info(f"2. VERIFICACIÓN: Verificando disponibilidad para {fecha_str} a las {hora_str}...")
-        is_available = check_availability(fecha_str, hora_str)
-
-        if not is_available:
-            logger.warning("❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
-            return {"status": "error", "agendamiento": {"status": "failed", "reason": "Horario no disponible"}}
-
-        # D. AGENDAMIENTO Y GUARDADO DE DATOS (si está disponible)
-        logger.info("3. AGENDAMIENTO & GUARDADO: Horario disponible. Procediendo a agendar.")
-
-        # Construir el objeto de datos para el Apps Script
-        data_to_save = {
-            "Cliente": cliente_nombre_completo,
-            "Telefono": cliente_telefono,
-            "Email": cliente_email,
-            "Direccion": cliente_direccion,
-            "FechaCita": fecha_str,
-            "HoraCita": hora_str,
-            "AgenteID": agent_id,
-            "TranscriptJSON": json.dumps(transcript) # Guardar la transcripción completa para referencia
-        }
-        
-        # Llamar al servicio de Sheets (que también agenda la cita a través del Apps Script Webhook)
-        sheets_result = write_data_to_sheets(data_to_save)
-
-        if sheets_result.get('status') == 'success':
-            logger.info("ÉXITO: Cita agendada y datos guardados correctamente por Apps Script.")
+        # 2. Detección de Agendamiento
+        if "AGENDAR_CITA_CONFIRMADA" in transcript_text:
+            print("🚀 INICIANDO WORKFLOW DE AGENDAMIENTO...")
             
-            # Opcional: Enviar email de confirmación al cliente
-            # if cliente_email != 'N/A' and cliente_email != '':
-            #     send_email(cliente_email, "Cita confirmada", f"Hola {cliente_nombre_completo}, tu cita ha sido agendada para el {fecha_str} a las {hora_str}.")
+            # --- Lógica de Extracción y Agendamiento ---
+            
+            # A. EXTRAER DATOS REALES DE LA TRANSCRIPCIÓN usando Gemini
+            print("1. EXTRACCIÓN DE DATOS: Llamando al LLM para obtener entidades...")
+            # Pasamos la lista de turnos (raw_transcript_list) para que Gemini pueda ver roles.
+            customer_data_raw = extract_customer_data(raw_transcript_list)
+            
+            if not customer_data_raw:
+                results["agendamiento"] = {"status": "failure", "message": "Fallo en la extracción de datos de Gemini."}
+                print(f"❌ AGENDAMIENTO FALLIDO: LLM no devolvió datos estructurados.")
+                return results
 
-            return {"status": "ok", "result": {"agendamiento": {"status": "success", "data": data_to_save, "apps_script_response": sheets_result}}}
-        else:
-            logger.error(f"❌ AGENDAMIENTO FALLIDO: Apps Script falló. Respuesta: {sheets_result}")
-            return {"status": "error", "agendamiento": {"status": "failed", "reason": "Fallo al guardar/agendar en Apps Script"}}
+            cita_data = _map_extracted_data(customer_data_raw)
+            fecha_str = cita_data['fechaCita']
+            hora_str = cita_data['horaCita']
+            
+            if not fecha_str or not hora_str:
+                results["agendamiento"] = {"status": "failure", "message": "Datos de cita incompletos (fecha/hora no encontradas)."}
+                print(f"❌ AGENDAMIENTO FALLIDO: Fecha u hora ausente en la extracción.")
+                return results
 
 
-    logger.info("DETECCIÓN: Ninguna intención de flujo de trabajo detectada.")
-    return {"status": "ok", "message": "No se detectó ninguna intención de flujo de trabajo para procesar."}
+            # B. VERIFICACIÓN DE DISPONIBILIDAD
+            print(f"2. VERIFICACIÓN: Verificando disponibilidad para {fecha_str} a las {hora_str}...")
+            is_available = check_availability(fecha_str, hora_str)
+
+            if not is_available:
+                results["agendamiento"] = {"status": "failure", "message": f"Horario no disponible: {fecha_str} a las {hora_str}."}
+                print(f"❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
+                return results
+
+            # C. AGENDAMIENTO Y GUARDADO DE DATOS (book_appointment llama al Apps Script Webhook)
+            print("3. AGENDAMIENTO: Horario disponible. Llamando a Apps Script...")
+            
+            book_result = book_appointment(
+                nombre=cita_data['nombre'], 
+                apellido=cita_data['apellido'],
+                telefono=cita_data['telefono'],
+                email=cita_data['email'], 
+                fechaCita=fecha_str, 
+                horaCita=hora_str
+            )
+            
+            results["agendamiento"] = book_result
+            if book_result.get('status') == 'success':
+                print(f"🎉 ÉXITO: Cita agendada y datos guardados por Apps Script.")
+            else:
+                print(f"⚠️ ERROR DE APPS SCRIPT: {book_result.get('message')}")
+
+            return results
+
+        # 4. Si NO hay agendamiento, ejecutar el flujo de Email por defecto
+        # ------------------------------------------------------------------
+        print("➡️ Ejecutando flujo de EMAIL por defecto...")
+        
+        send_email_to_client(transcript_text, agent_name)
+
+        workflow = config.get("workflow") or ["email"]
+        
+        for step in workflow:
+            step_norm = str(step or "").strip().lower()
+
+            if step_norm in ("email", "enviar_email"):
+                email_cfg = config.get("email") or {}
+                body = transcript_text or "No se recibió transcripción de la llamada."
+                
+                try:
+                    print("📧 Enviando correo (Zoho SMTP) con la conversación...")
+                    result_email = send_email(email_cfg, agent_name, event)
+                    results["email"] = result_email if isinstance(result_email, dict) else {"status": "ok", "detail": str(result_email)}
+                except Exception as e:
+                    results["email"] = {"status": "error", "message": str(e)}
+
+            else:
+                results[step_norm or "unknown"] = {"status": "skipped"}
+
+        return results
+
+    except Exception as e:
+        print(f"🚨 Error general en process_agent_event: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
