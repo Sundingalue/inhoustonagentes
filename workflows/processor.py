@@ -15,7 +15,7 @@ from services.calendar_service import book_appointment
 # Configuración del logger
 logger = logging.getLogger(__name__)
 
-# --- Funciones Auxiliares ---
+# --- Funciones Auxiliares (Sin Cambios) ---
 
 def _read_agent_config(agent_name: str) -> Dict[str, Any]:
     """Lee agents/<agent_name>.json y retorna el dict o {} si no existe."""
@@ -80,6 +80,7 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
     # Obtenemos la lista cruda de turnos (necesaria para el LLM)
     raw_transcript_list = event.get('raw', {}).get('data', {}).get('transcript', [])
     if not raw_transcript_list:
+        # Fallback si el payload no es estándar de ElevenLabs
         raw_transcript_list = [{"role": "user", "message": transcript_text}]
 
 
@@ -90,18 +91,16 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
             return {"error": f"agent '{agent_name}' not found or invalid config"}
 
         # 2. Detección de Agendamiento
-        transcript_lower = transcript_text.lower()
-        
-        # ✅ CORRECCIÓN CLAVE: Detección Robusta (busca la palabra 'agendar' Y 'cita' en el transcript)
-        is_agendar_cita = "agendar" in transcript_lower and "cita" in transcript_lower
-        
-        if is_agendar_cita:
+        # ✅ CORRECCIÓN CLAVE: Buscar frase natural "agendar cita"
+        if "agendar cita" in transcript_text.lower():
             print("🚀 INICIANDO WORKFLOW DE AGENDAMIENTO...")
             
             # --- Lógica de Extracción y Agendamiento ---
             
             # A. EXTRAER DATOS REALES DE LA TRANSCRIPCIÓN usando Gemini
             print("1. EXTRACCIÓN DE DATOS: Llamando al LLM para obtener entidades...")
+            
+            # Usamos la transcripción cruda para la extracción
             customer_data_raw = extract_customer_data(raw_transcript_list)
             
             if not customer_data_raw:
@@ -179,3 +178,4 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
         print(f"🚨 Error general en process_agent_event: {e}")
         traceback.print_exc()
         return {"error": str(e)}
+
