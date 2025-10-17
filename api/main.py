@@ -13,10 +13,10 @@ import traceback
 # Usamos 'os.path.dirname' para encontrar el directorio donde está main.py (api/)
 # Luego usamos 'os.path.join' y 'os.path.abspath' para retroceder y encontrar la ruta correcta.
 # 
-# Si main.py está en /project/api/main.py, la ruta de la config es /project/agents
+# Si main.py está en /project/api/main.py, la ruta de la config es /project/IN-HOUSTON-AGENTES/agents
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ✅ CORRECCIÓN CLAVE: Subimos del directorio 'api' (..) y vamos directamente a 'agents'
-BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'agents')
+# Retrocede un nivel del directorio 'api', y luego busca la carpeta:
+BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'IN-HOUSTON-AGENTES', 'agents')
 BOT_CONFIG_DIR = os.path.abspath(BOT_CONFIG_DIR)
 
 # =========================
@@ -218,9 +218,8 @@ async def handle_agent_event(
             raise HTTPException(status_code=404, detail=detail_msg)
         
         # 4. Procesamiento
-        # ✅ CORRECCIÓN CLAVE: Pasamos el nombre legible del agente (ej: "sundin") a processor.py
-        agent_name = config_filename.replace(".json", "")
-        result = process_agent_event(agent_name, normalized)
+        # process_agent_event recibe el nombre legible del bot (ej: "sundin")
+        result = process_agent_event(config_filename.replace(".json", ""), normalized)
 
         return JSONResponse(status_code=200, content={"status": "ok", "result": result})
 
