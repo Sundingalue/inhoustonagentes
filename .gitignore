@@ -15,5 +15,4 @@ __pycache__/
 secrets.json
 # Claves privadas
 keys/google_service_account.json
-keys/service_key.json
 
