@@ -5,25 +5,21 @@ from typing import Dict, Any, List, Optional
 import requests
 import traceback
 
-# Importar el nuevo servicio de análisis
+# Importar servicios
 from services.analysis_service import extract_customer_data 
 from services.calendar_checker import check_availability
 from services.email_service import send_email
 from services.send_client_email import send_email_to_client
-
-# ✅ CORRECCIÓN CLAVE: Usamos la función book_appointment (que hace el trabajo)
 from services.calendar_service import book_appointment 
-
-# Otros servicios (mantener inactivos por ahora)
-# from services.sheets_service import save_conversation # Ya no se usa directamente aquí
-# ...
 
 # Configuración del logger
 logger = logging.getLogger(__name__)
 
-# Función auxiliar para leer configuración (tomada de tu código anterior)
+# --- Funciones Auxiliares (Sin Cambios) ---
+
 def _read_agent_config(agent_name: str) -> Dict[str, Any]:
     """Lee agents/<agent_name>.json y retorna el dict o {} si no existe."""
+    # ... (Tu código para leer la configuración del agente)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     agents_dir = os.path.join(base_dir, "..", "agents")
     json_path = os.path.normpath(os.path.join(agents_dir, f"{agent_name}.json"))
@@ -37,16 +33,14 @@ def _read_agent_config(agent_name: str) -> Dict[str, Any]:
         print(f"❌ Error leyendo JSON del agente {agent_name}: {e}")
         return {}
 
-# Función auxiliar para extraer transcripción (tomada de tu código corregido)
 def _extract_transcript_text(event: Dict[str, Any]) -> str:
     """Obtiene el texto de **toda** la conversación desde el evento normalizado."""
+    # ... (Tu código para extraer el transcript)
     txt = (event.get("transcript_text") or "").strip()
     if txt: return txt
-    
     raw = event.get("raw") or {}
     root = raw.get("data", raw) if isinstance(raw, dict) else {}
     tr = root.get("transcript") or root.get("transcription") or []
-    
     if isinstance(tr, list):
         try:
             return " ".join(
@@ -62,9 +56,8 @@ def _extract_transcript_text(event: Dict[str, Any]) -> str:
 
 def _map_extracted_data(extracted: Dict[str, Any]) -> Dict[str, str]:
     """Mapea los datos de Gemini a los campos esperados por Apps Script."""
-    # Intentamos separar Nombre y Apellido si es posible, sino usamos el completo.
+    # ... (Tu código para mapear los datos)
     full_name = extracted.get('cliente_nombre_completo', 'N/A').split(' ', 1)
-    
     return {
         "nombre": full_name[0] if full_name else 'N/A',
         "apellido": full_name[1] if len(full_name) > 1 else 'N/A',
@@ -82,13 +75,12 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
     """
     results: Dict[str, Any] = {}
     
-    # Intento de rescate del transcript si la normalización falló por alguna razón
     transcript_text = _extract_transcript_text(event)
     
-    # Necesitamos el payload crudo para enviárselo a la función de extracción
+    # Obtenemos la lista cruda de turnos (necesaria para el LLM)
     raw_transcript_list = event.get('raw', {}).get('data', {}).get('transcript', [])
     if not raw_transcript_list:
-        # Si el transcript no está en 'raw', construimos uno simple.
+        # Fallback si el payload no es estándar de ElevenLabs
         raw_transcript_list = [{"role": "user", "message": transcript_text}]
 
 
@@ -99,14 +91,16 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
             return {"error": f"agent '{agent_name}' not found or invalid config"}
 
         # 2. Detección de Agendamiento
-        if "AGENDAR_CITA_CONFIRMADA" in transcript_text:
+        # ✅ CORRECCIÓN CLAVE: Buscar frase natural "agendar cita"
+        if "agendar cita" in transcript_text.lower():
             print("🚀 INICIANDO WORKFLOW DE AGENDAMIENTO...")
             
             # --- Lógica de Extracción y Agendamiento ---
             
             # A. EXTRAER DATOS REALES DE LA TRANSCRIPCIÓN usando Gemini
             print("1. EXTRACCIÓN DE DATOS: Llamando al LLM para obtener entidades...")
-            # Pasamos la lista de turnos (raw_transcript_list) para que Gemini pueda ver roles.
+            
+            # Usamos la transcripción cruda para la extracción
             customer_data_raw = extract_customer_data(raw_transcript_list)
             
             if not customer_data_raw:
@@ -133,7 +127,7 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
                 print(f"❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
                 return results
 
-            # C. AGENDAMIENTO Y GUARDADO DE DATOS (book_appointment llama al Apps Script Webhook)
+            # C. AGENDAMIENTO Y GUARDADO DE DATOS
             print("3. AGENDAMIENTO: Horario disponible. Llamando a Apps Script...")
             
             book_result = book_appointment(
@@ -184,3 +178,4 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
         print(f"🚨 Error general en process_agent_event: {e}")
         traceback.print_exc()
         return {"error": str(e)}
+
