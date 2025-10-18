@@ -106,53 +106,64 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
             if not customer_data_raw:
                 results["agendamiento"] = {"status": "failure", "message": "Fallo en la extracción de datos de Gemini."}
                 print(f"❌ AGENDAMIENTO FALLIDO: LLM no devolvió datos estructurados.")
-                return results
-
-            cita_data = _map_extracted_data(customer_data_raw)
-            fecha_str = cita_data['fechaCita']
-            hora_str = cita_data['horaCita']
+                # Nota: Dejamos que continúe para que envíe el email de fallo si es necesario
             
-            if not fecha_str or not hora_str:
-                results["agendamiento"] = {"status": "failure", "message": "Datos de cita incompletos (fecha/hora no encontradas)."}
-                print(f"❌ AGENDAMIENTO FALLIDO: Fecha u hora ausente en la extracción.")
-                return results
-
-
-            # B. VERIFICACIÓN DE DISPONIBILIDAD
-            print(f"2. VERIFICACIÓN: Verificando disponibilidad para {fecha_str} a las {hora_str}...")
-            is_available = check_availability(fecha_str, hora_str)
-
-            if not is_available:
-                results["agendamiento"] = {"status": "failure", "message": f"Horario no disponible: {fecha_str} a las {hora_str}."}
-                print(f"❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
-                return results
-
-            # C. AGENDAMIENTO Y GUARDADO DE DATOS
-            print("3. AGENDAMIENTO: Horario disponible. Llamando a Apps Script...")
-            
-            book_result = book_appointment(
-                nombre=cita_data['nombre'], 
-                apellido=cita_data['apellido'],
-                telefono=cita_data['telefono'],
-                email=cita_data['email'], 
-                fechaCita=fecha_str, 
-                horaCita=hora_str
-            )
-            
-            results["agendamiento"] = book_result
-            if book_result.get('status') == 'success':
-                print(f"🎉 ÉXITO: Cita agendada y datos guardados por Apps Script.")
             else:
-                print(f"⚠️ ERROR DE APPS SCRIPT: {book_result.get('message')}")
+                cita_data = _map_extracted_data(customer_data_raw)
+                fecha_str = cita_data['fechaCita']
+                hora_str = cita_data['horaCita']
+                
+                if not fecha_str or not hora_str:
+                    results["agendamiento"] = {"status": "failure", "message": "Datos de cita incompletos (fecha/hora no encontradas)."}
+                    print(f"❌ AGENDAMIENTO FALLIDO: Fecha u hora ausente en la extracción.")
+                
+                else:
+                    # B. VERIFICACIÓN DE DISPONIBILIDAD
+                    print(f"2. VERIFICACIÓN: Verificando disponibilidad para {fecha_str} a las {hora_str}...")
+                    is_available = check_availability(fecha_str, hora_str)
 
-            return results
+                    if not is_available:
+                        results["agendamiento"] = {"status": "failure", "message": f"Horario no disponible: {fecha_str} a las {hora_str}."}
+                        print(f"❌ AGENDAMIENTO FALLIDO: Horario no disponible.")
+                    
+                    else:
+                        # C. AGENDAMIENTO Y GUARDADO DE DATOS
+                        print("3. AGENDAMIENTO: Horario disponible. Llamando a Apps Script...")
+                        
+                        book_result = book_appointment(
+                            nombre=cita_data['nombre'], 
+                            apellido=cita_data['apellido'],
+                            telefono=cita_data['telefono'],
+                            email=cita_data['email'], 
+                            fechaCita=fecha_str, 
+                            horaCita=hora_str
+                        )
+                        
+                        results["agendamiento"] = book_result
+                        if book_result.get('status') == 'success':
+                            print(f"🎉 ÉXITO: Cita agendada y datos guardados por Apps Script.")
+                        else:
+                            print(f"⚠️ ERROR DE APPS SCRIPT: {book_result.get('message')}")
+            
+            # ⛔️ LÍNEA ELIMINADA ⛔️
+            # return results  <- ESTA LÍNEA ES LA QUE CAUSABA EL PROBLEMA. Se ha eliminado.
+            # Al eliminarla, el código AHORA continuará hacia el flujo de email.
 
-        # 4. Si NO hay agendamiento, ejecutar el flujo de Email por defecto
-        # ------------------------------------------------------------------
-        print("➡️ Ejecutando flujo de EMAIL por defecto...")
+        # 4. Flujo de Email (Ahora se ejecuta SIEMPRE, después de intentar agendar o si no se agendó)
+        # -----------------------------------------------------------------------------------------
+        print("➡️ Ejecutando flujo de EMAIL (Cliente e Interno)...")
         
-        send_email_to_client(transcript_text, agent_name)
+        # Enviar correo al CLIENTE (con la transcripción)
+        try:
+            print("📧 Enviando correo al CLIENTE...")
+            send_email_to_client(transcript_text, agent_name)
+            results["email_cliente"] = {"status": "ok", "message": "Correo de transcripción enviado al cliente."}
+        except Exception as e:
+            print(f"❌ Error enviando correo al cliente: {e}")
+            results["email_cliente"] = {"status": "error", "message": str(e)}
 
+
+        # Enviar correo INTERNO (al negocio, con la transcripción)
         workflow = config.get("workflow") or ["email"]
         
         for step in workflow:
@@ -163,11 +174,11 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
                 body = transcript_text or "No se recibió transcripción de la llamada."
                 
                 try:
-                    print("📧 Enviando correo (Zoho SMTP) con la conversación...")
+                    print("📧 Enviando correo INTERNO (Zoho SMTP) con la conversación...")
                     result_email = send_email(email_cfg, agent_name, event)
-                    results["email"] = result_email if isinstance(result_email, dict) else {"status": "ok", "detail": str(result_email)}
+                    results["email_interno"] = result_email if isinstance(result_email, dict) else {"status": "ok", "detail": str(result_email)}
                 except Exception as e:
-                    results["email"] = {"status": "error", "message": str(e)}
+                    results["email_interno"] = {"status": "error", "message": str(e)}
 
             else:
                 results[step_norm or "unknown"] = {"status": "skipped"}
@@ -178,4 +189,3 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
         print(f"🚨 Error general en process_agent_event: {e}")
         traceback.print_exc()
         return {"error": str(e)}
-
