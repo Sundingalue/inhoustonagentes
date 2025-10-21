@@ -29,7 +29,8 @@ def _render_transcript_blocks(transcript_list: List[Dict[str, Any]]) -> tuple[st
     blocks_html = []
     
     # Colores CSS en línea para las burbujas
-    AGENT_COLOR = "#F7BD02"
+    # --- CAMBIO 1 ---
+    AGENT_COLOR = "#333333"  # CAMBIADO de #F7BD02 a un gris oscuro
     USER_COLOR = "#4d4d4d"
     
     for item in (transcript_list or []):
@@ -48,7 +49,8 @@ def _render_transcript_blocks(transcript_list: List[Dict[str, Any]]) -> tuple[st
         if role == "agent":
             who_label = "Agente"
             bubble_color = AGENT_COLOR
-            text_color = "#1a1a1a" # Texto oscuro sobre amarillo
+            # --- CAMBIO 2 ---
+            text_color = "#F7BD02" # CAMBIADO de #1a1a1a a dorado (para texto sobre fondo oscuro)
             meta_detail = "" # <-- CAMBIAR A VACÍO
             # Alineación a la derecha (Chat-Agente)
             align_dir = "right"
