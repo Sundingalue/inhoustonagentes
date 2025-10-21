@@ -3,58 +3,79 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <title>Resumen de Conversación</title>
     <style>
-        /* Estilos para clientes que sí soportan media queries */
-        @media (max-width: 600px) {
-            .main-table {
-                width: 100% !important;
+        /* Estilos base para modo claro (inline) son anulados por esto */
+        :root {
+            color-scheme: light dark;
+            supported-color-schemes: light dark;
+        }
+
+        /* Estilos para MODO OSCURO */
+        @media (prefers-color-scheme: dark) {
+            .body {
+                background-color: #000000 !important;
             }
-            .content-cell {
-                padding: 15px !important;
+            .main-container, .card, .transcript-card {
+                background-color: #1a1a1a !important;
+                border-color: #333333 !important;
+            }
+            .title-text, .label-text {
+                color: #FFD700 !important;
+            }
+            .main-text, .card-text {
+                color: #ffffff !important;
+            }
+            .transcript-text {
+                color: #f0f0f0 !important;
+            }
+            .footer-text {
+                color: #555555 !important;
             }
         }
     </style>
 </head>
-<body style="margin: 0; padding: 0; background-color: #000000; font-family: Arial, sans-serif;">
+<body style="margin: 0; padding: 0; background-color: #f0f0f0; font-family: Arial, sans-serif;" class="body">
     
-    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #000000;">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f0f0f0;" class="body">
         <tr>
             <td align="center" style="padding: 20px 10px;"> 
                 
-                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px;" class="main-table">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; background-color: #ffffff;" class="main-container">
                     <tr>
-                        <td style="padding: 20px; background-color: #000000; border-radius: 12px;" class="content-cell">
+                        <td style="padding: 20px;" class="content-cell">
                             
-                            <h1 style="font-weight: 800; font-size: 18px; color: #FFD700; letter-spacing: 0.5px; margin: 0 0 20px 0; text-align: center;">
+                            <h1 style="font-weight: 800; font-size: 18px; color: #8B5A00; letter-spacing: 0.5px; margin: 0 0 20px 0; text-align: center;" class="title-text">
                                 IN HOUSTON TEXAS - RESUMEN DE LLAMADA
                             </h1>
                             
-                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #1a1a1a; border: 1px solid #333333; border-radius: 8px; margin-bottom: 20px; color: #f0f0f0; font-size: 14px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #ffffff; border: 1px solid #dddddd; border-radius: 8px; margin-bottom: 20px; color: #333333; font-size: 14px;" class="card">
                                 <tr>
                                     <td style="padding: 20px;">
                                         <table width="100%" border="0" cellspacing="0" cellpadding="0">
                                             <tr>
                                                 <td style="padding-bottom: 12px;" width="40%">
-                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Agente:</b>
+                                                    <b style="color: #666666; font-size: 13px; text-transform: uppercase;" class="label-text">Agente:</b>
                                                 </td>
-                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ agent_name }}</td>
+                                                <td style="padding-bottom: 12px; color: #111111;" class="card-text">{{ agent_name }}</td>
                                             </tr>
                                             <tr>
                                                 <td style="padding-bottom: 12px;">
-                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Contacto:</b>
+                                                    <b style="color: #666666; font-size: 13px; text-transform: uppercase;" class="label-text">Contacto:</b>
                                                 </td>
-                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ caller_number }}</td>
+                                                <td style="padding-bottom: 12px; color: #111111;" class="card-text">{{ caller_number }}</td>
                                             </tr>
                                             <tr>
                                                 <td style="padding-bottom: 12px;">
-                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Hora:</b>
+                                                    <b style="color: #666666; font-size: 13px; text-transform: uppercase;" class="label-text">Hora:</b>
                                                 </td>
-                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ call_time }}</td>
+                                                <td style="padding-bottom: 12px; color: #111111;" class="card-text">{{ call_time }}</td>
                                             </tr>
                                             <tr>
                                                 <td style="padding-top: 5px;">
-                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Estado:</b>
+                                                    <b style="color: #666666; font-size: 13px; text-transform: uppercase;" class="label-text">Estado:</b>
                                                 </td>
                                                 <td style="padding-top: 5px;">
                                                     <span style="background-color: #FFD700; color: #000000; font-weight: bold; padding: 3px 8px; border-radius: 5px; font-size: 12px; text-transform: uppercase;">
@@ -67,19 +88,19 @@
                                 </tr>
                             </table>
                             
-                            <h2 style="font-weight: 600; font-size: 16px; color:#FFD700; margin: 20px 0 10px 0; text-align: left;">
+                            <h2 style="font-weight: 600; font-size: 16px; color: #8B5A00; margin: 20px 0 10px 0; text-align: left;" class="title-text">
                                 Transcripción:
                             </h2>
 
-                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #1a1a1a; border: 1px solid #333333; border-radius: 8px; color: #f0f0f0; font-size: 14px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f9f9f9; border: 1px solid #eeeeee; border-radius: 8px; color: #333333; font-size: 14px;" class="transcript-card">
                                 <tr>
-                                    <td style="padding: 20px; line-height: 1.5;">
+                                    <td style="padding: 20px; line-height: 1.5;" class="transcript-text">
                                         {{ conversation_blocks_html }}
                                     </td>
                                 </tr>
                             </table>
                             
-                            <p style="text-align:center; font-size:12px; color:#555555; margin-top:30px; margin-bottom: 0;">
+                            <p style="text-align:center; font-size:12px; color: #999999; margin-top:30px; margin-bottom: 0;" class="footer-text">
                                 Este correo es un resumen automático del sistema IN-HOUSTON-AGENTES.
                             </p>
 
