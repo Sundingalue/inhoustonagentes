@@ -4,51 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Resumen de Conversación</title>
-    </head>
+    <style>
+        /* Estilos para clientes que sí soportan media queries */
+        @media (max-width: 600px) {
+            .main-table {
+                width: 100% !important;
+            }
+            .content-cell {
+                padding: 15px !important;
+            }
+        }
+    </style>
+</head>
 <body style="margin: 0; padding: 0; background-color: #000000; font-family: Arial, sans-serif;">
     
-    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #000000;" class="main-table">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #000000;">
         <tr>
-            <td align="center" style="padding: 20px 0; background-color: #000000;" class="bg-cell"> 
+            <td align="center" style="padding: 20px 10px;"> 
                 
-                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; background-color: #000000;">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px;" class="main-table">
                     <tr>
-                        <td style="padding: 20px;">
+                        <td style="padding: 20px; background-color: #000000; border-radius: 12px;" class="content-cell">
                             
                             <h1 style="font-weight: 800; font-size: 18px; color: #FFD700; letter-spacing: 0.5px; margin: 0 0 20px 0; text-align: center;">
                                 IN HOUSTON TEXAS - RESUMEN DE LLAMADA
                             </h1>
                             
-                            <table width="100%" border="0" cellspacing="0" cellpadding="15" style="background-color: #1a1a1a; border: 1px solid #333333; border-radius: 8px; margin-bottom: 20px; color: #f0f0f0; font-size: 14px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #1a1a1a; border: 1px solid #333333; border-radius: 8px; margin-bottom: 20px; color: #f0f0f0; font-size: 14px;">
                                 <tr>
-                                    <td width="50%" style="padding-bottom:6px;">
-                                        <b style="color: #FFD700;">Agente Asignado:</b>
+                                    <td style="padding: 20px;">
+                                        <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                                            <tr>
+                                                <td style="padding-bottom: 12px;" width="40%">
+                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Agente:</b>
+                                                </td>
+                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ agent_name }}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding-bottom: 12px;">
+                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Contacto:</b>
+                                                </td>
+                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ caller_number }}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding-bottom: 12px;">
+                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Hora:</b>
+                                                </td>
+                                                <td style="padding-bottom: 12px; color: #ffffff;">{{ call_time }}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding-top: 5px;">
+                                                    <b style="color: #FFD700; font-size: 13px; text-transform: uppercase;">Estado:</b>
+                                                </td>
+                                                <td style="padding-top: 5px;">
+                                                    <span style="background-color: #FFD700; color: #000000; font-weight: bold; padding: 3px 8px; border-radius: 5px; font-size: 12px; text-transform: uppercase;">
+                                                        {{ status | default: 'NUEVO' }}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        </table>
                                     </td>
-                                    <td style="padding-bottom:6px;">{{ agent_name }}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding-bottom:6px;">
-                                        <b style="color: #FFD700;">Número de Contacto:</b>
-                                    </td>
-                                    <td style="padding-bottom:6px;">{{ caller_number }}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding-top:6px;">
-                                        <b style="color: #FFD700;">Hora de Llamada:</b>
-                                    </td>
-                                    <td style="padding-top:6px;">{{ call_time }}</td>
                                 </tr>
                             </table>
                             
-                            <div style="font-weight:600; font-size:16px; color:#FFD700; margin:20px 0 15px 0; text-align:center;">
-                                Transcripción Detallada
-                            </div>
+                            <h2 style="font-weight: 600; font-size: 16px; color:#FFD700; margin: 20px 0 10px 0; text-align: left;">
+                                Transcripción:
+                            </h2>
+
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #1a1a1a; border: 1px solid #333333; border-radius: 8px; color: #f0f0f0; font-size: 14px;">
+                                <tr>
+                                    <td style="padding: 20px; line-height: 1.5;">
+                                        {{ conversation_blocks_html }}
+                                    </td>
+                                </tr>
+                            </table>
                             
-                            <div style="font-size: 0; line-height: 0;">
-                                {{ conversation_blocks_html }}
-                            </div>
-                            
-                            <p style="text-align:center; font-size:12px; color:#4b5563; margin-top:30px; margin-bottom: 0;">
+                            <p style="text-align:center; font-size:12px; color:#555555; margin-top:30px; margin-bottom: 0;">
                                 Este correo es un resumen automático del sistema IN-HOUSTON-AGENTES.
                             </p>
 
