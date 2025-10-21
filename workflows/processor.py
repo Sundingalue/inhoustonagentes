@@ -90,23 +90,50 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
         if not config:
             return {"error": f"agent '{agent_name}' not found or invalid config"}
 
+        # ======================================================
+        # ✅ LÓGICA DE DETECCIÓN DE AGENDAMIENTO (ACTUALIZADA)
+        # ======================================================
+        
+        # 1. Lista de frases clave que disparan el agendamiento (tus variables)
+        FRASES_PARA_AGENDAR = [
+            "quiero agendar una cita",
+            "agendar una cita",
+            "agendar cita", # La original
+            "agendar",
+            "quiero una cita",
+            "cita" 
+            # Cuidado: "cita" es corta y podría activarse por error. 
+            # Si pasa, puedes quitarla de esta lista.
+        ]
+
+        # 2. Normalizamos el texto de la conversación a minúsculas
+        texto_conversacion = transcript_text.lower()
+
+        # 3. Comprobamos si ALGUNA de las frases clave está en la conversación
+        debe_agendar = False
+        frase_detectada = ""
+        for frase in FRASES_PARA_AGENDAR:
+            if frase in texto_conversacion:
+                debe_agendar = True
+                frase_detectada = frase
+                break # Encontramos una, no necesitamos buscar más
+        
+        # ======================================================
+
         # 2. Detección de Agendamiento
-        # ✅ CORRECCIÓN CLAVE: Buscar frase natural "agendar cita"
-        if "agendar cita" in transcript_text.lower():
-            print("🚀 INICIANDO WORKFLOW DE AGENDAMIENTO...")
+        if debe_agendar:
+            print(f"🚀 INICIANDO WORKFLOW DE AGENDAMIENTO (Frase detectada: '{frase_detectada}')...")
             
             # --- Lógica de Extracción y Agendamiento ---
             
             # A. EXTRAER DATOS REALES DE LA TRANSCRIPCIÓN usando Gemini
             print("1. EXTRACCIÓN DE DATOS: Llamando al LLM para obtener entidades...")
             
-            # Usamos la transcripción cruda para la extracción
             customer_data_raw = extract_customer_data(raw_transcript_list)
             
             if not customer_data_raw:
                 results["agendamiento"] = {"status": "failure", "message": "Fallo en la extracción de datos de Gemini."}
                 print(f"❌ AGENDAMIENTO FALLIDO: LLM no devolvió datos estructurados.")
-                # Nota: Dejamos que continúe para que envíe el email de fallo si es necesario
             
             else:
                 cita_data = _map_extracted_data(customer_data_raw)
@@ -145,12 +172,11 @@ def process_agent_event(agent_name: str, event: Dict[str, Any]) -> Dict[str, Any
                         else:
                             print(f"⚠️ ERROR DE APPS SCRIPT: {book_result.get('message')}")
             
-            # ⛔️ LÍNEA ELIMINADA ⛔️
-            # return results  <- ESTA LÍNEA ES LA QUE CAUSABA EL PROBLEMA. Se ha eliminado.
-            # Al eliminarla, el código AHORA continuará hacia el flujo de email.
+            # (Ya no hay 'return' aquí, por lo que el código continúa)
 
-        # 4. Flujo de Email (Ahora se ejecuta SIEMPRE, después de intentar agendar o si no se agendó)
-        # -----------------------------------------------------------------------------------------
+
+        # 4. Flujo de Email (Se ejecuta SIEMPRE)
+        # -----------------------------------------------------------------
         print("➡️ Ejecutando flujo de EMAIL (Cliente e Interno)...")
         
         # Enviar correo al CLIENTE (con la transcripción)
