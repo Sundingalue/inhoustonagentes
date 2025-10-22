@@ -5,6 +5,7 @@ import hmac, hashlib, os, json, base64
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 import traceback
+from twilio.rest import Client
 
 # =========================
 # Configuración del Directorio
@@ -45,6 +46,24 @@ SKIP_HMAC = (os.getenv("ELEVENLABS_SKIP_HMAC") or "false").strip().lower() == "t
 if not HMAC_SECRET and not SKIP_HMAC:
     raise RuntimeError("❌ Falta ELEVENLABS_HMAC_SECRET (o define ELEVENLABS_SKIP_HMAC=true para omitir).")
 
+# =========================
+# Config Twilio
+# =========================
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
+twilio_client = None
+twilio_configurado = False
+
+if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+    try:
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio_configurado = True
+        print("✅ Cliente de Twilio configurado exitosamente.")
+    except Exception as e:
+        print(f"⚠️  ADVERTENCIA: Error al configurar cliente de Twilio: {e}")
+else:
+    print("⚠️  ADVERTENCIA: Faltan variables de entorno de Twilio. El SMS no funcionará.")
 
 # =========================
 # Lógica de Mapeo de Agentes
@@ -257,8 +276,9 @@ class CitaPayload(dict):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if not all(k in self for k in ["cliente_nombre", "fecha", "hora"]):
-            raise ValueError("Payload missing required keys: cliente_nombre, fecha, hora")
+        required_keys = ["cliente_nombre", "fecha", "hora", "telefono"]
+        if not all(k in self for k in required_keys):
+            raise ValueError(f"Payload missing one of required keys: {required_keys}")
 
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
@@ -310,6 +330,31 @@ async def agendar_cita_endpoint(request: Request):
         if book_result.get('status') == 'success':
             success_message = f"Cita agendada con éxito para {cliente_nombre}. Mensaje de Apps Script: {book_result.get('message', 'Éxito.')}"
             print(f"🎉 Éxito: {success_message}")
+
+            # --- INICIO: Enviar SMS de Confirmación con Twilio ---
+            if twilio_configurado:
+                try:
+                    cliente_telefono = payload.get('telefono')
+                    if cliente_telefono:
+                        mensaje_sms = (
+                            f"In Houston Texas: Hola {cliente_nombre}. "
+                            f"Le confirmamos su cita para el {fecha_str} a las {hora_str}."
+                        )
+                        
+                        print(f"🔄 Enviando SMS de confirmación a {cliente_telefono}...")
+                        message = twilio_client.messages.create(
+                            body=mensaje_sms,
+                            from_=TWILIO_PHONE_NUMBER,
+                            to=cliente_telefono
+                        )
+                        print(f"✅ SMS enviado exitosamente. SID: {message.sid}")
+                    else:
+                        print("⚠️ No se encontró 'telefono' en el payload, no se puede enviar SMS.")
+
+                except Exception as sms_error:
+                    # Importante: Si falla el SMS, no detenemos todo. Solo lo registramos.
+                    print(f"⚠️ Falló el envío de SMS, pero la cita FUE AGENDADA. Error: {sms_error}")
+            # --- FIN: Enviar SMS de Confirmación con Twilio ---
             
             return JSONResponse(
                 status_code=200,
