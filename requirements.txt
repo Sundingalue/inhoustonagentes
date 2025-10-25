@@ -11,3 +11,5 @@ gspread
 pytz
 google-genai
 twilio
+bcrypt
+python-jose[cryptography]

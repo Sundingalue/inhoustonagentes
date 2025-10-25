@@ -1,11 +1,27 @@
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from jose import JWTError, jwt
 from workflows.processor import process_agent_event
 import hmac, hashlib, os, json, base64
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 import traceback
 from twilio.rest import Client
+import bcrypt
+import glob
+from datetime import datetime, timedelta
+import time
+import io
+
+# Importar las funciones del servicio que acabamos de añadir
+from services.elevenlabs_service import (
+    get_eleven_agents,
+    get_eleven_phone_numbers,
+    get_agent_consumption_data,
+    start_batch_call
+)
 
 # =========================
 # Configuración del Directorio
@@ -110,6 +126,53 @@ def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
 
     except Exception as e:
         print(f"💥 Error al intentar mapear el agente: {e}")
+        return None
+
+# --- NUEVO HELPER DE LOGIN (AÑADIDO) ---
+AGENT_USERNAME_TO_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca la configuración completa del agente (ej. 'sundin.json') dado el 'agent_user'
+    definido en el archivo de configuración.
+    """
+    
+    # 1. Intentar encontrar en el caché
+    if username in AGENT_USERNAME_TO_CONFIG_CACHE:
+        return AGENT_USERNAME_TO_CONFIG_CACHE[username]
+
+    # 2. Si no está en caché, recorrer los archivos del directorio
+    try:
+        if not os.path.isdir(BOT_CONFIG_DIR):
+            print(f"❌ Directorio de agentes no encontrado. Ruta calculada: {BOT_CONFIG_DIR}")
+            return None
+
+        print(f"Buscando el 'agent_user' {username} en el directorio: {BOT_CONFIG_DIR}")
+        
+        for filename in os.listdir(BOT_CONFIG_DIR):
+            if not filename.endswith(".json") or filename.startswith("_"):
+                continue
+
+            filepath = os.path.join(BOT_CONFIG_DIR, filename)
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                config: Dict[str, Any] = json.load(f)
+                
+                # 3. Comprobar si el 'agent_user' coincide (que crearemos en WordPress)
+                if config.get("agent_user") == username:
+                    # 4. Encontramos la coincidencia, guardamos en caché y devolvemos
+                    # ¡Guardamos el slug (nombre de archivo) DENTRO de la config para usarlo!
+                    config["_bot_slug"] = filename.replace(".json", "")
+                    AGENT_USERNAME_TO_CONFIG_CACHE[username] = config
+                    print(f"✅ Mapeo de usuario encontrado: {username} -> {filename}")
+                    return config
+        
+        # Si el loop termina sin encontrarlo
+        print(f"❌ No se encontró ningún archivo JSON con el 'agent_user' {username}.")
+        return None
+
+    except Exception as e:
+        print(f"💥 Error al intentar mapear el usuario del agente: {e}")
         return None
 
 # =========================
@@ -382,3 +445,275 @@ async def agendar_cita_endpoint(request: Request):
         print(f"💥 Error grave en /agendar_cita: {e}")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
+
+
+# =================================================================
+# === INICIO: LÓGICA DEL PANEL AGENTES (AÑADIDO) ==================
+# =================================================================
+
+# --- 1. Configuración de Autenticación (JWT para Agentes) ---
+# Usamos el HMAC_SECRET como secreto del JWT, o uno nuevo si lo defines.
+AGENT_JWT_SECRET = os.getenv("AGENT_JWT_SECRET", HMAC_SECRET) 
+JWT_ALGORITHM = "HS256"
+# Este endpoint '/agent/login' lo crearemos más abajo
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/agent/login") 
+
+if not AGENT_JWT_SECRET:
+    raise RuntimeError("❌ Falta AGENT_JWT_SECRET (o ELEVENLABS_HMAC_SECRET) para el login de agentes.")
+
+# --- 2. Modelos de Datos (Pydantic) para FastAPI ---
+class AgentDataRequest(BaseModel):
+    start_date: str
+    end_date: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class AgentData(BaseModel):
+    bot_slug: str
+    config: Dict[str, Any]
+
+
+# --- 3. Dependencia de Autenticación (El "Guardia" de los Endpoints) ---
+async def get_current_agent(token: str = Depends(oauth2_scheme)) -> AgentData:
+    """
+    Dependencia de FastAPI: Decodifica el token JWT, verifica que sea válido
+    y devuelve la configuración del agente.
+    """
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Credenciales inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, AGENT_JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        bot_slug: str = payload.get("sub") # "sub" (subject) es el bot_slug
+        if bot_slug is None:
+            raise credentials_exception
+            
+        # Volvemos a cargar la config del agente desde el slug (asegura datos frescos)
+        # Usamos la ruta de tu variable global BOT_CONFIG_DIR
+        bot_file_path = os.path.join(BOT_CONFIG_DIR, f"{bot_slug}.json")
+        if not os.path.exists(bot_file_path):
+            print(f"❌ Error de Token: No se encontró el archivo {bot_file_path} para el slug {bot_slug}")
+            raise credentials_exception
+            
+        with open(bot_file_path, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
+        
+        return AgentData(bot_slug=bot_slug, config=config_data)
+        
+    except JWTError:
+        raise credentials_exception
+
+
+# --- 4. Endpoints de Sincronización para Admin (WordPress) ---
+# (Estos endpoints deben estar protegidos por tu autenticación de admin/bearer)
+# (¡IMPORTANTE! Debes añadir tu propia seguridad a estos dos endpoints)
+
+@app.get("/admin/sync-agents")
+async def admin_sync_agents(
+    # TODO: Añadir aquí tu dependencia de autenticación de admin
+    # ej: admin_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Endpoint para que WordPress pida la lista de agentes de ElevenLabs.
+    """
+    result = get_eleven_agents()
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+    
+    # Extraemos solo lo que WordPress necesita: (name, agent_id)
+    agents_list = [
+        {"agent_id": a.get("agent_id"), "name": a.get("name")}
+        for a in result["data"].get("agents", [])
+    ]
+    return JSONResponse(content={"ok": True, "data": agents_list})
+
+@app.get("/admin/sync-numbers")
+async def admin_sync_numbers(
+    # TODO: Añadir aquí tu dependencia de autenticación de admin
+):
+    """
+    Endpoint para que WordPress pida la lista de números de ElevenLabs.
+    """
+    result = get_eleven_phone_numbers()
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+        
+    # Extraemos solo lo que WordPress necesita: (id, phone_number)
+    numbers_list = [
+        {"phone_number_id": n.get("phone_number_id"), "phone_number": n.get("phone_number")}
+        for n in result["data"].get("phone_numbers", [])
+    ]
+    return JSONResponse(content={"ok": True, "data": numbers_list})
+
+
+# --- 5. Endpoints del Panel Agentes (Cliente) ---
+
+@app.post("/agent/login", response_model=Token)
+async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Endpoint de login para el shortcode [panel_agentes].
+    Usa el formato OAuth2 (username, password) que espera FastAPI.
+    """
+    username = form_data.username
+    password = form_data.password
+
+    # 1. Buscar al agente por su 'agent_user' usando nuestro nuevo helper
+    agent_config = map_username_to_agent_data(username)
+    
+    if not agent_config:
+        print(f"Login fallido: Usuario '{username}' no encontrado.")
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    # 2. Verificar la contraseña
+    # (El 'agent_pass_hash' lo creará WordPress)
+    stored_hash = agent_config.get('agent_pass_hash', '').encode('utf-8')
+    
+    try:
+        # Usamos bcrypt para comparar el password con el hash
+        if not bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+            print(f"Login fallido: Contraseña incorrecta para '{username}'.")
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    except ValueError:
+        print(f"Login fallido: Hash de contraseña inválido o vacío para '{username}'.")
+        raise HTTPException(status_code=500, detail="Error de configuración de cuenta")
+
+    # 3. ¡Éxito! Crear y devolver un token
+    bot_slug = agent_config["_bot_slug"] # El nombre de archivo (ej. 'sundin')
+    
+    # Creamos el token JWT
+    payload = {
+        "sub": bot_slug, # 'sub' (subject) es el estándar para el ID de usuario
+        "iat": int(time.time()),
+        "exp": int(time.time()) + (12 * 3600)  # Expira en 12 horas
+    }
+    access_token = jwt.encode(payload, AGENT_JWT_SECRET, algorithm=JWT_ALGORITHM)
+    
+    print(f"Login exitoso para: {username} (slug: {bot_slug})")
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/agent/data")
+async def get_agent_data(
+    request: AgentDataRequest, 
+    agent: AgentData = Depends(get_current_agent) # El "Guardia"
+):
+    """
+    Endpoint seguro para obtener los datos de consumo del agente.
+    El agente se identifica por el token JWT.
+    """
+    bot_config = agent.config
+    
+    # De tu JSON: "elevenlabs_agent_id"
+    agent_id = bot_config.get('elevenlabs_agent_id') 
+    # 'phone_number' lo guardaremos en el JSON desde WordPress
+    phone_number = bot_config.get('phone_number') 
+    # 'name' lo guardaremos en el JSON desde WordPress
+    agent_name = bot_config.get('name', agent.bot_slug) 
+    
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs")
+
+    # 2. Convertir fechas a Unix
+    try:
+        start_unix = int(time.mktime(datetime.strptime(request.start_date, '%Y-%m-%d').timetuple()))
+        # Aseguramos que la fecha final sea al final del día (23:59:59)
+        end_dt = datetime.strptime(request.end_date, '%Y-%m-%d') + timedelta(days=1, seconds=-1)
+        end_unix = int(time.mktime(end_dt.timetuple()))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha inválido, usar YYYY-MM-DD")
+
+    # 3. Consultar la API de consumo
+    result = get_agent_consumption_data(agent_id, start_unix, end_unix)
+    
+    if not result["ok"]:
+        # Si no hay datos (ej. agente no encontrado en reporte), devolvemos ceros
+        consumption_data = {"calls": 0, "credits": 0, "minutes": 0}
+    else:
+        # Usamos los campos normalizados de nuestro helper
+        d = result["data"]
+        consumption_data = {
+            "calls": d.get("calls", 0),
+            "credits": d.get("credits", 0),
+            "minutes": d.get("duration_secs", 0) / 60
+        }
+
+    # 4. Devolver el JSON final
+    # (¡IMPORTANTE! Debes añadir tu lógica de 'costo por crédito' aquí)
+    # Por ahora usamos un valor fijo, pero deberías cargarlo desde .env
+    try:
+        usd_per_credit = float(os.getenv("ELEVENLABS_USD_PER_CREDIT", "0.0001"))
+    except:
+        usd_per_credit = 0.0001
+        
+    total_cost_usd = consumption_data["credits"] * usd_per_credit
+
+    final_data = {
+        "agent_name": agent_name,
+        "phone_number": phone_number,
+        "calls": consumption_data["calls"],
+        "credits_consumed": consumption_data["credits"],
+        "total_cost_usd": total_cost_usd
+    }
+    return JSONResponse(content={"ok": True, "data": final_data})
+
+
+@app.post("/agent/start-batch-call")
+async def handle_batch_call(
+    agent: AgentData = Depends(get_current_agent), # El "Guardia"
+    batch_name: str = Form(...),
+    csv_file: UploadFile = File(...)
+):
+    """
+    Endpoint seguro para iniciar un lote de llamadas.
+    Recibe un formulario 'multipart/form-data'.
+    """
+    bot_config = agent.config
+
+    if not csv_file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Se requiere un archivo .csv válido")
+
+    # 1. Leer la configuración del bot (para IDs)
+    agent_id = bot_config.get('elevenlabs_agent_id')
+    # 'eleven_phone_number_id' lo guardaremos en el JSON desde WordPress
+    phone_number_id = bot_config.get('eleven_phone_number_id') 
+
+    if not agent_id or not phone_number_id:
+        raise HTTPException(status_code=400, detail="Agente o número de teléfono no configurado")
+
+    # 2. Procesar el CSV y convertirlo a JSON para la API
+    recipients = []
+    try:
+        # Leer el archivo CSV en memoria
+        csv_data = (await csv_file.read()).decode("utf-8")
+        csv_reader = csv.DictReader(io.StringIO(csv_data))
+        
+        for row in csv_reader:
+            if 'phone_number' not in row:
+                raise HTTPException(status_code=400, detail="El CSV debe contener una columna 'phone_number'")
+            
+            # (Aquí puedes añadir más variables dinámicas si las necesitas)
+            recipients.append({"phone_number": row['phone_number']})
+            
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error procesando el CSV: {e}")
+
+    if not recipients:
+        raise HTTPException(status_code=400, detail="El CSV no contiene destinatarios")
+
+    # 3. Enviar la petición a ElevenLabs
+    print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
+    result = start_batch_call(batch_name, agent_id, phone_number_id, recipients)
+    
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    # ¡Éxito!
+    return JSONResponse(content={"ok": True, "data": result["data"]})
+
+# =================================================================
+# === FIN: LÓGICA DEL PANEL AGENTES ===============================
+# =================================================================
