@@ -26,10 +26,10 @@ from services.elevenlabs_service import (
 # =========================
 # Configuración del Directorio
 # =========================
-# SOLUCIÓN DE RUTA DEFINITIVA: 
+# SOLUCIÓN DE RUTA DEFINITIVA:
 # Usamos 'os.path.dirname' para encontrar el directorio donde está main.py (api/)
 # Luego usamos 'os.path.join' y 'os.path.abspath' para retroceder y encontrar la ruta correcta.
-# 
+#
 # Si main.py está en /project/api/main.py, la ruta de la config es /project/agents
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # ✅ CORRECCIÓN CLAVE: Subimos del directorio 'api' (..) y vamos directamente a 'agents'
@@ -91,7 +91,7 @@ def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     Busca el nombre del archivo de configuración (ej. 'sundin.json') dado el ID
     largo de ElevenLabs (ej. 'agent_8301...').
     """
-    
+
     # 1. Intentar encontrar en el caché
     if agent_id in AGENT_ID_TO_FILENAME_CACHE:
         return AGENT_ID_TO_FILENAME_CACHE[agent_id]
@@ -103,23 +103,23 @@ def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
             return None
 
         print(f"Buscando el ID de Agente {agent_id} en el directorio: {BOT_CONFIG_DIR}")
-        
+
         for filename in os.listdir(BOT_CONFIG_DIR):
             if not filename.endswith(".json") or filename.startswith("_"):
                 continue
 
             filepath = os.path.join(BOT_CONFIG_DIR, filename)
-            
+
             with open(filepath, 'r', encoding='utf-8') as f:
                 config: Dict[str, Any] = json.load(f)
-                
+
                 # 3. Comprobar si el ID del agente de ElevenLabs coincide
                 if config.get("elevenlabs_agent_id") == agent_id:
                     # 4. Encontramos la coincidencia, guardamos en caché y devolvemos
                     AGENT_ID_TO_FILENAME_CACHE[agent_id] = filename
                     print(f"✅ Mapeo encontrado: {agent_id} -> {filename}")
                     return filename
-        
+
         # Si el loop termina sin encontrarlo
         print(f"❌ No se encontró ningún archivo JSON con el ID de agente {agent_id} en {BOT_CONFIG_DIR}.")
         return None
@@ -136,7 +136,7 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
     Busca la configuración completa del agente (ej. 'sundin.json') dado el 'agent_user'
     definido en el archivo de configuración.
     """
-    
+
     # 1. Intentar encontrar en el caché
     if username in AGENT_USERNAME_TO_CONFIG_CACHE:
         return AGENT_USERNAME_TO_CONFIG_CACHE[username]
@@ -148,16 +148,16 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
             return None
 
         print(f"Buscando el 'agent_user' {username} en el directorio: {BOT_CONFIG_DIR}")
-        
+
         for filename in os.listdir(BOT_CONFIG_DIR):
             if not filename.endswith(".json") or filename.startswith("_"):
                 continue
 
             filepath = os.path.join(BOT_CONFIG_DIR, filename)
-            
+
             with open(filepath, 'r', encoding='utf-8') as f:
                 config: Dict[str, Any] = json.load(f)
-                
+
                 # 3. Comprobar si el 'agent_user' coincide (que crearemos en WordPress)
                 if config.get("agent_user") == username:
                     # 4. Encontramos la coincidencia, guardamos en caché y devolvemos
@@ -166,7 +166,7 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
                     AGENT_USERNAME_TO_CONFIG_CACHE[username] = config
                     print(f"✅ Mapeo de usuario encontrado: {username} -> {filename}")
                     return config
-        
+
         # Si el loop termina sin encontrarlo
         print(f"❌ No se encontró ningún archivo JSON con el 'agent_user' {username}.")
         return None
@@ -298,7 +298,7 @@ async def handle_agent_event(
             # Si no encuentra el mapeo
             detail_msg = f"Config file not found for ElevenLabs ID: {agent_id}. Ensure an agent config file in '{BOT_CONFIG_DIR}/' contains the key 'elevenlabs_agent_id' with this ID."
             raise HTTPException(status_code=404, detail=detail_msg)
-        
+
         # 4. Procesamiento
         # ✅ CORRECCIÓN CLAVE: Pasamos el nombre legible del agente (ej: "sundin") a processor.py
         agent_name = config_filename.replace(".json", "")
@@ -330,7 +330,7 @@ def envcheck():
 # =========================
 # Las funciones de servicio deben estar disponibles en el entorno de Render
 from services.calendar_checker import check_availability
-from services.calendar_service import book_appointment 
+from services.calendar_service import book_appointment
 
 # Definición de la estructura de datos que esperamos para agendar
 class CitaPayload(dict):
@@ -361,10 +361,10 @@ async def agendar_cita_endpoint(request: Request):
         cliente_nombre = payload['cliente_nombre']
         fecha_str = payload['fecha']
         hora_str = payload['hora']
-        
+
         # 2. Verificar Disponibilidad (Usando services/calendar_checker.py)
         print(f"🔄 Verificando disponibilidad para {cliente_nombre} en {fecha_str} a las {hora_str}...")
-        
+
         is_available = check_availability(fecha_str, hora_str)
 
         if not is_available:
@@ -378,17 +378,17 @@ async def agendar_cita_endpoint(request: Request):
 
         # 3. Agendar Cita y Guardar Datos (Usando services/calendar_service.py - Webhook de Apps Script)
         print("✅ Disponible. Procediendo a agendar el evento mediante Apps Script Webhook...")
-        
+
         # book_appointment requiere 6 campos, usamos placeholders para los no provistos en la prueba.
         book_result = book_appointment(
-            nombre=cliente_nombre, 
+            nombre=cliente_nombre,
             apellido="N/A",         # Placeholder para el test
             telefono="N/A",         # Placeholder para el test
             email="test@webhook.com", # Placeholder para el test
-            fechaCita=fecha_str, 
+            fechaCita=fecha_str,
             horaCita=hora_str
         )
-        
+
         # 4. Analizar la Respuesta del Webhook de Apps Script
         if book_result.get('status') == 'success':
             success_message = f"Cita agendada con éxito para {cliente_nombre}. Mensaje de Apps Script: {book_result.get('message', 'Éxito.')}"
@@ -403,7 +403,7 @@ async def agendar_cita_endpoint(request: Request):
                             f"In Houston Texas: Hola {cliente_nombre}. "
                             f"Le confirmamos su cita para el {fecha_str} a las {hora_str}."
                         )
-                        
+
                         print(f"🔄 Enviando SMS de confirmación a {cliente_telefono}...")
                         message = twilio_client.messages.create(
                             body=mensaje_sms,
@@ -418,7 +418,7 @@ async def agendar_cita_endpoint(request: Request):
                     # Importante: Si falla el SMS, no detenemos todo. Solo lo registramos.
                     print(f"⚠️ Falló el envío de SMS, pero la cita FUE AGENDADA. Error: {sms_error}")
             # --- FIN: Enviar SMS de Confirmación con Twilio ---
-            
+
             return JSONResponse(
                 status_code=200,
                 content={
@@ -453,10 +453,10 @@ async def agendar_cita_endpoint(request: Request):
 
 # --- 1. Configuración de Autenticación (JWT para Agentes) ---
 # Usamos el HMAC_SECRET como secreto del JWT, o uno nuevo si lo defines.
-AGENT_JWT_SECRET = os.getenv("AGENT_JWT_SECRET", HMAC_SECRET) 
+AGENT_JWT_SECRET = os.getenv("AGENT_JWT_SECRET", HMAC_SECRET)
 JWT_ALGORITHM = "HS256"
 # Este endpoint '/agent/login' lo crearemos más abajo
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/agent/login") 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/agent/login")
 
 if not AGENT_JWT_SECRET:
     raise RuntimeError("❌ Falta AGENT_JWT_SECRET (o ELEVENLABS_HMAC_SECRET) para el login de agentes.")
@@ -491,19 +491,19 @@ async def get_current_agent(token: str = Depends(oauth2_scheme)) -> AgentData:
         bot_slug: str = payload.get("sub") # "sub" (subject) es el bot_slug
         if bot_slug is None:
             raise credentials_exception
-            
+
         # Volvemos a cargar la config del agente desde el slug (asegura datos frescos)
         # Usamos la ruta de tu variable global BOT_CONFIG_DIR
         bot_file_path = os.path.join(BOT_CONFIG_DIR, f"{bot_slug}.json")
         if not os.path.exists(bot_file_path):
             print(f"❌ Error de Token: No se encontró el archivo {bot_file_path} para el slug {bot_slug}")
             raise credentials_exception
-            
+
         with open(bot_file_path, 'r', encoding='utf-8') as f:
             config_data = json.load(f)
-        
+
         return AgentData(bot_slug=bot_slug, config=config_data)
-        
+
     except JWTError:
         raise credentials_exception
 
@@ -523,12 +523,21 @@ async def admin_sync_agents(
     result = get_eleven_agents()
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
-    
+
     # Extraemos solo lo que WordPress necesita: (name, agent_id)
-    agents_list = [
-        {"agent_id": a.get("agent_id"), "name": a.get("name")}
-        for a in result["data"].get("agents", [])
-    ]
+    agents_list = []
+    # Asegurarse que 'agents' existe y es una lista antes de iterar
+    if isinstance(result.get("data"), dict) and isinstance(result["data"].get("agents"), list):
+        agents_list = [
+            {"agent_id": a.get("agent_id"), "name": a.get("name")}
+            for a in result["data"].get("agents", []) if isinstance(a, dict)
+        ]
+    elif isinstance(result.get("data"), list): # Fallback por si la API cambia
+         agents_list = [
+            {"agent_id": a.get("agent_id"), "name": a.get("name")}
+            for a in result["data"] if isinstance(a, dict)
+        ]
+
     return JSONResponse(content={"ok": True, "data": agents_list})
 
 @app.get("/admin/sync-numbers")
@@ -541,12 +550,29 @@ async def admin_sync_numbers(
     result = get_eleven_phone_numbers()
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
-        
-    # Extraemos solo lo que WordPress necesita: (id, phone_number)
-    numbers_list = [
-        {"phone_number_id": n.get("phone_number_id"), "phone_number": n.get("phone_number")}
-        for n in result["data"].get("phone_numbers", [])
-    ]
+
+    # << CORRECCIÓN DEL ERROR AttributeError >>
+    numbers_list = []
+    # Verificar si 'data' es un diccionario y contiene 'phone_numbers' (estructura esperada)
+    if isinstance(result.get("data"), dict) and isinstance(result["data"].get("phone_numbers"), list):
+        phone_numbers_data = result["data"].get("phone_numbers", [])
+    # Fallback: si 'data' es directamente la lista (menos probable según docs, pero más seguro)
+    elif isinstance(result.get("data"), list):
+        phone_numbers_data = result["data"]
+    else:
+        # Si la estructura no es la esperada, devolver lista vacía o error
+        print(f"⚠️ Estructura inesperada en respuesta de /v1/convai/phone-numbers: {result.get('data')}")
+        phone_numbers_data = [] # O podrías lanzar una HTTPException aquí
+
+    # Iterar sobre la lista de números encontrada
+    for n in phone_numbers_data:
+        # Asegurarse que cada elemento 'n' es un diccionario antes de usar .get()
+        if isinstance(n, dict):
+            numbers_list.append({
+                "phone_number_id": n.get("phone_number_id"),
+                "phone_number": n.get("phone_number")
+            })
+
     return JSONResponse(content={"ok": True, "data": numbers_list})
 
 
@@ -563,7 +589,7 @@ async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     # 1. Buscar al agente por su 'agent_user' usando nuestro nuevo helper
     agent_config = map_username_to_agent_data(username)
-    
+
     if not agent_config:
         print(f"Login fallido: Usuario '{username}' no encontrado.")
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
@@ -571,7 +597,7 @@ async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
     # 2. Verificar la contraseña
     # (El 'agent_pass_hash' lo creará WordPress)
     stored_hash = agent_config.get('agent_pass_hash', '').encode('utf-8')
-    
+
     try:
         # Usamos bcrypt para comparar el password con el hash
         if not bcrypt.checkpw(password.encode('utf-8'), stored_hash):
@@ -583,7 +609,7 @@ async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     # 3. ¡Éxito! Crear y devolver un token
     bot_slug = agent_config["_bot_slug"] # El nombre de archivo (ej. 'sundin')
-    
+
     # Creamos el token JWT
     payload = {
         "sub": bot_slug, # 'sub' (subject) es el estándar para el ID de usuario
@@ -591,14 +617,14 @@ async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
         "exp": int(time.time()) + (12 * 3600)  # Expira en 12 horas
     }
     access_token = jwt.encode(payload, AGENT_JWT_SECRET, algorithm=JWT_ALGORITHM)
-    
+
     print(f"Login exitoso para: {username} (slug: {bot_slug})")
     return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.post("/agent/data")
 async def get_agent_data(
-    request: AgentDataRequest, 
+    request: AgentDataRequest,
     agent: AgentData = Depends(get_current_agent) # El "Guardia"
 ):
     """
@@ -606,14 +632,14 @@ async def get_agent_data(
     El agente se identifica por el token JWT.
     """
     bot_config = agent.config
-    
+
     # De tu JSON: "elevenlabs_agent_id"
-    agent_id = bot_config.get('elevenlabs_agent_id') 
+    agent_id = bot_config.get('elevenlabs_agent_id')
     # 'phone_number' lo guardaremos en el JSON desde WordPress
-    phone_number = bot_config.get('phone_number') 
+    phone_number = bot_config.get('phone_number')
     # 'name' lo guardaremos en el JSON desde WordPress
-    agent_name = bot_config.get('name', agent.bot_slug) 
-    
+    agent_name = bot_config.get('name', agent.bot_slug)
+
     if not agent_id:
         raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs")
 
@@ -628,7 +654,7 @@ async def get_agent_data(
 
     # 3. Consultar la API de consumo
     result = get_agent_consumption_data(agent_id, start_unix, end_unix)
-    
+
     if not result["ok"]:
         # Si no hay datos (ej. agente no encontrado en reporte), devolvemos ceros
         consumption_data = {"calls": 0, "credits": 0, "minutes": 0}
@@ -648,7 +674,7 @@ async def get_agent_data(
         usd_per_credit = float(os.getenv("ELEVENLABS_USD_PER_CREDIT", "0.0001"))
     except:
         usd_per_credit = 0.0001
-        
+
     total_cost_usd = consumption_data["credits"] * usd_per_credit
 
     final_data = {
@@ -679,7 +705,7 @@ async def handle_batch_call(
     # 1. Leer la configuración del bot (para IDs)
     agent_id = bot_config.get('elevenlabs_agent_id')
     # 'eleven_phone_number_id' lo guardaremos en el JSON desde WordPress
-    phone_number_id = bot_config.get('eleven_phone_number_id') 
+    phone_number_id = bot_config.get('eleven_phone_number_id')
 
     if not agent_id or not phone_number_id:
         raise HTTPException(status_code=400, detail="Agente o número de teléfono no configurado")
@@ -690,14 +716,14 @@ async def handle_batch_call(
         # Leer el archivo CSV en memoria
         csv_data = (await csv_file.read()).decode("utf-8")
         csv_reader = csv.DictReader(io.StringIO(csv_data))
-        
+
         for row in csv_reader:
             if 'phone_number' not in row:
                 raise HTTPException(status_code=400, detail="El CSV debe contener una columna 'phone_number'")
-            
+
             # (Aquí puedes añadir más variables dinámicas si las necesitas)
             recipients.append({"phone_number": row['phone_number']})
-            
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error procesando el CSV: {e}")
 
@@ -707,7 +733,7 @@ async def handle_batch_call(
     # 3. Enviar la petición a ElevenLabs
     print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
     result = start_batch_call(batch_name, agent_id, phone_number_id, recipients)
-    
+
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
 
