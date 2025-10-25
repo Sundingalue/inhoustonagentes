@@ -13,3 +13,4 @@ google-genai
 twilio
 bcrypt
 python-jose[cryptography]
+python-multipart
