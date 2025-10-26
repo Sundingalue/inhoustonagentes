@@ -1,7 +1,7 @@
 import os
 import requests
 import json
-import time
+import time # Necesario para time.time()
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVEN_API_BASE = "https://api.elevenlabs.io/v1"
@@ -45,7 +45,7 @@ def _eleven_request(method, endpoint, payload=None, params=None):
         print(f"[ElevenLabs] Connection Error: {req_err}")
         return {"ok": False, "error": f"Connection error: {req_err}"}
 
-# --- Functions for Admin Sync (Unchanged) ---
+# --- Funciones de sincronización y consumo (sin cambios) ---
 def get_eleven_agents():
     print("[ElevenLabs] Getting agent list...")
     return _eleven_request("GET", "/convai/agents")
@@ -54,11 +54,8 @@ def get_eleven_phone_numbers():
     print("[ElevenLabs] Getting phone number list...")
     return _eleven_request("GET", "/convai/phone-numbers")
 
-# ===================================================================
-# === FINAL FUNCTION (Local Start Date Filtering, Fallback Credits) =
-# ===================================================================
 def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
-    """Obtiene datos de consumo. (Mantenemos la lógica de filtrado local)."""
+    # ... (Código completo de esta función SIN CAMBIOS) ...
     print(f"[EL] Getting conversations BEFORE {end_unix_ts} for Agent ID: {agent_id}...")
     endpoint = "/convai/conversations"
     all_conversations = []
@@ -79,12 +76,10 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     if page_num > max_pages: print(f"[EL] WARN: Reached max pages limit ({max_pages}).")
     print(f"[EL] Received {len(all_conversations)} conversations BEFORE local filtering.")
 
-    # --- Local Filtering by Start Date ---
     filtered_conversations = []; start_filter_ts_int = int(start_unix_ts)
     for convo in all_conversations:
          if isinstance(convo, dict):
-             convo_start_value = convo.get("start_time_unix_secs")
-             convo_start_num = None
+             convo_start_value = convo.get("start_time_unix_secs"); convo_start_num = None
              if convo_start_value is not None:
                  try: convo_start_num = int(float(convo_start_value))
                  except (ValueError, TypeError): pass
@@ -92,8 +87,6 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
                  filtered_conversations.append(convo)
 
     print(f"[EL] {len(filtered_conversations)} conversations AFTER filtering by start date >= {start_filter_ts_int}.")
-
-    # --- Calculate Totals on Filtered List ---
     total_calls, total_credits, total_seconds = 0, 0.0, 0.0
     for convo in filtered_conversations:
         if convo.get('call_successful') == 'success':
@@ -103,56 +96,40 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     print(f"[EL] Final Calculation: {total_calls} calls, {total_credits:.4f} credits (estimated).")
     normalized_data = {"agent_id": agent_id, "calls": total_calls, "duration_secs": total_seconds, "credits": total_credits}
     return {"ok": True, "data": normalized_data}
-# ===================================================================
-# === END FINAL FUNCTION ============================================
-# ===================================================================
 
 
 # ===================================================================
-# === FUNCIÓN FINAL: ENVÍO DE LOTES (Soporta variables dinámicas) ===
+# === FUNCIÓN CORREGIDA: ENVÍO DE LOTES (Fuerza Inicio Inmediato) ===
 # ===================================================================
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
     """
-    Inicia una llamada por lotes a múltiples destinatarios.
-    'recipients_json' contiene las variables dinámicas anidadas.
+    Inicia una llamada por lotes (a múltiples destinatarios) y fuerza la programación
+    al instante actual para evitar el estado 'Programado' por defecto.
     """
     
-    print(f"[EL] Initiating BATCH CAMPAIGN: {call_name} for Agent: {agent_id} with {len(recipients_json)} recipients.")
+    print(f"[EL] Initiating PRIORITY BATCH CAMPAIGN: {call_name} for Agent: {agent_id} with {len(recipients_json)} recipients.")
     
     endpoint = "/convai/batch-calling/submit"
     
-    # Adaptar los datos de recipients_json a la estructura que necesita la API
-    # La API de ElevenLabs necesita los números en 'phone_number' y las variables en 'dynamic_variables'
-    # Como nuestro main.py ya anida correctamente las variables en 'dynamic_variables', 
-    # solo tenemos que mapear eso a la estructura final:
-    
-    # recipients_final = []
-    # for r in recipients_json:
-    #     # La API de lotes a veces acepta las variables directamente al lado del número
-    #     # Vamos a enviarle la estructura que creamos en main.py, asumiendo que es suficiente
-    #     recipients_final.append(r) 
-        
-    # NOTA: EL CÓDIGO ANTERIOR EN main.py YA CREÓ LA ESTRUCTURA FINAL CORRECTA
-    # recipients_json es ahora una lista de dicts: [{'phone_number': '+1...', 'dynamic_variables': {'name': '...'} }]
+    # *** LÍNEA CLAVE: Programa el lote para que inicie AHORA MISMO ***
+    scheduled_timestamp = int(time.time()) 
     
     payload = {
         "call_name": call_name,
         "agent_id": agent_id,
         "agent_phone_number_id": phone_number_id,
-        # La API de ElevenLabs para Batch Calling parece esperar la estructura
-        # simplificada que nuestro main.py ya está enviando:
-        "recipients": recipients_json 
+        "recipients": recipients_json,
+        "scheduled_time_unix": scheduled_timestamp # <--- FUERZA INICIO INMEDIATO
     }
     
     # Hacemos la llamada POST al endpoint de LOTES
     result = _eleven_request("POST", endpoint, payload=payload)
     
     if result.get("ok"):
-        print(f"[EL] Batch submission successful. Status: Programado/Queue.")
+        print(f"[EL] Batch submission successful. Status: PRIORITY QUEUE.")
         # La API devuelve el batch_id.
-        return {"ok": True, "data": {"status": "Lote enviado a la cola (Programado/Scheduled)", "id": result['data'].get('batch_id')}}
+        return {"ok": True, "data": {"status": "Lote enviado con prioridad de inicio inmediato", "id": result['data'].get('batch_id')}}
     
-    # En caso de error, el error de API se maneja en _eleven_request
     return result
 # ===================================================================
 # === END FINAL FUNCTION ============================================
