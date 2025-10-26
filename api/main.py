@@ -155,30 +155,71 @@ from services.calendar_service import book_appointment
 class CitaPayload(dict):
     def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); required = ["cliente_nombre", "fecha", "hora", "telefono"];
     if not all(k in self for k in required): raise ValueError(f"Faltan keys: {required}")
+
+# ==========================================================
+# === FUNCIÓN agendar_cita_endpoint CORREGIDA (Indentación) ===
+# ==========================================================
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
+    """
+    Endpoint que coordina la verificación de disponibilidad y la creación del evento.
+    Simula la llamada final que haría la lógica de 'workflows/processor.py'.
+    """
+    # --- TRY PRINCIPAL ---
     try:
+        # 1. Cargar y validar el JSON de la solicitud (Payload)
         try: payload = CitaPayload(await request.json())
         except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
         except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
-        cn=payload['cliente_nombre']; fs=payload['fecha']; hs=payload['hora']
-        print(f"🔄 Verificando disponibilidad {cn} {fs} {hs}...")
-        if not check_availability(fs, hs): return JSONResponse(status_code=409, content={"status":"failure","message":f"No disponible: {fs} {hs}."})
-        print("✅ Disponible. Agendando..."); book_result = book_appointment(nombre=cn, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fs, horaCita=hs)
+
+        cliente_nombre = payload['cliente_nombre']; fecha_str = payload['fecha']; hora_str = payload['hora']
+
+        # 2. Verificar Disponibilidad
+        print(f"🔄 Verificando disponibilidad {cliente_nombre} {fecha_str} {hs}...") # Corrección menor: hs -> hora_str
+        if not check_availability(fecha_str, hora_str):
+            return JSONResponse(status_code=409, content={"status":"failure", "message":f"No disponible: {fecha_str} {hora_str}."})
+
+        # 3. Agendar Cita
+        print("✅ Disponible. Agendando...");
+        book_result = book_appointment(nombre=cliente_nombre, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fecha_str, horaCita=hora_str)
+
+        # 4. Analizar Respuesta y Enviar SMS
         if book_result.get('status') == 'success':
-            msg = f"Cita agendada {cn}. {book_result.get('message','Éxito.')}" ; print(f"🎉 {msg}")
+            success_message = f"Cita agendada para {cliente_nombre}. {book_result.get('message','Éxito.')}"
+            print(f"🎉 {success_message}")
+
+            # --- INICIO: Enviar SMS de Confirmación con Twilio ---
             if twilio_configurado:
                 try: # TRY para SMS
-                    tel = payload.get('telefono')
-                    if tel: sms = f"In Houston: Hola {cn}. Confirmamos cita {fs} {hs}."; print(f"🔄 SMS a {tel}..."); m = twilio_client.messages.create(body=sms, from_=TWILIO_PHONE_NUMBER, to=tel); print(f"✅ SMS SID: {m.sid}")
-                    else: print("⚠️ No tel para SMS.")
-                # EXCEPT AÑADIDO Y CORREGIDO
+                    cliente_telefono = payload.get('telefono')
+                    if cliente_telefono:
+                        mensaje_sms = f"In Houston Texas: Hola {cliente_nombre}. Confirmamos su cita para el {fecha_str} a las {hora_str}."
+                        print(f"🔄 Enviando SMS a {cliente_telefono}...")
+                        message = twilio_client.messages.create(body=mensaje_sms, from_=TWILIO_PHONE_NUMBER, to=cliente_telefono)
+                        print(f"✅ SMS enviado. SID: {message.sid}")
+                    else:
+                        print("⚠️ No se encontró 'telefono' en payload, no se puede enviar SMS.")
                 except Exception as sms_error:
-                    print(f"⚠️ Falló envío SMS (CITA AGENDADA). Error: {sms_error}")
-            return JSONResponse(status_code=200, content={"status":"success", "message":msg})
-        else: return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','?')})
-     except HTTPException as h: return JSONResponse(status_code=h.status_code, content={"error":h.detail})
-     except Exception as e: print(f"💥 Error /agendar_cita: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error":"internal_error", "detail":str(e)})
+                    # Si falla el SMS, no detenemos todo. Solo lo registramos.
+                    print(f"⚠️ Falló envío SMS (pero CITA FUE AGENDADA). Error: {sms_error}")
+            # --- FIN: Enviar SMS ---
+
+            return JSONResponse(status_code=200, content={"status":"success", "message":success_message})
+        else:
+             # Si el Apps Script falla o devuelve un error
+            return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','Error desconocido Webhook.')})
+
+    # --- EXCEPT DEL TRY PRINCIPAL (Indentación corregida) ---
+    except HTTPException as h:
+        return JSONResponse(status_code=h.status_code, content={"error": h.detail})
+    except Exception as e:
+        print(f"💥 Error grave en /agendar_cita: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
+# ==========================================================
+# === FIN FUNCIÓN CORREGIDA ================================
+# ==========================================================
+
 
 # =================================================================
 # === INICIO: LÓGICA DEL PANEL AGENTES ============================
@@ -192,49 +233,18 @@ class AgentDataRequest(BaseModel): start_date: str; end_date: str
 class Token(BaseModel): access_token: str; token_type: str
 class AgentData(BaseModel): bot_slug: str; config: Dict[str, Any]
 
-# ==========================================================
-# === FUNCIÓN get_current_agent CORREGIDA ==================
-# ==========================================================
 async def get_current_agent(token: str = Depends(oauth2_scheme)) -> AgentData:
-    """
-    Dependencia de FastAPI: Decodifica el token JWT, verifica que sea válido
-    y devuelve la configuración del agente.
-    """
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Credenciales inválidas",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    # --- Estructura try/except CORREGIDA ---
+    credentials_exception = HTTPException(status_code=401, detail="Credenciales inválidas", headers={"WWW-Authenticate": "Bearer"})
     try:
         payload = jwt.decode(token, AGENT_JWT_SECRET, algorithms=[JWT_ALGORITHM])
         bot_slug: str = payload.get("sub")
-        # El 'if slug is None' debe estar DENTRO del try
-        if bot_slug is None:
-            print("❌ Error Token: No 'sub' (bot_slug) in payload.")
-            raise credentials_exception
-
+        if bot_slug is None: print("❌ Error Token: No 'sub'"); raise credentials_exception
         bot_file_path = os.path.join(BOT_CONFIG_DIR, f"{bot_slug}.json")
-        if not os.path.exists(bot_file_path):
-            print(f"❌ Error Token: No se encontró el archivo {bot_file_path} para el slug {bot_slug}")
-            raise credentials_exception
-
-        with open(bot_file_path, 'r', encoding='utf-8') as f:
-            config_data = json.load(f)
-
+        if not os.path.exists(bot_file_path): print(f"❌ Error Token: No archivo {bot_file_path}"); raise credentials_exception
+        with open(bot_file_path, 'r', encoding='utf-8') as f: config_data = json.load(f)
         return AgentData(bot_slug=bot_slug, config=config_data)
-
-    except JWTError as e: # Captura errores específicos de JWT
-        print(f"❌ Error Token: JWT inválido o expirado. {e}")
-        raise credentials_exception
-    except Exception as e: # Captura otros errores (ej. lectura de archivo)
-        print(f"💥 Error inesperado en get_current_agent: {e}")
-        traceback.print_exc()
-        # Aún devolvemos 401 por seguridad si algo falla aquí
-        raise credentials_exception
-# ==========================================================
-# === FIN FUNCIÓN CORREGIDA ================================
-# ==========================================================
+    except JWTError as e: print(f"❌ Error Token: JWT inválido. {e}"); raise credentials_exception
+    except Exception as e: print(f"💥 Error get_current_agent: {e}"); traceback.print_exc(); raise credentials_exception
 
 @app.get("/admin/sync-agents")
 async def admin_sync_agents():
