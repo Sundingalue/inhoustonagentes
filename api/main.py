@@ -15,7 +15,7 @@ import glob
 from datetime import datetime, timedelta
 import time
 import io
-import csv # <--- AÑADIDO (faltaba para el batch call)
+import csv
 
 # Importar las funciones del servicio que acabamos de añadir
 from services.elevenlabs_service import (
@@ -672,15 +672,20 @@ async def get_agent_data(
         raise HTTPException(status_code=400, detail="Formato de fecha inválido, usar YYYY-MM-DD")
 
     # 3. Consultar la API de consumo (¡Pasando la API Key del cliente!)
+    # ==========================================================
+    # === ¡AQUÍ ESTÁ LA CORRECCIÓN! ============================
+    # ==========================================================
     result = get_agent_consumption_data(
         agent_id=agent_id,
-        start_timestamp_unix=start_unix,
-        end_timestamp_unix=end_unix,
-        client_api_key=api_key # <--- Pasar la clave
+        start_unix=start_unix, # <-- CORREGIDO (antes 'start_timestamp_unix')
+        end_unix=end_unix,      # <-- CORREGIDO (antes 'end_timestamp_unix')
+        client_api_key=api_key 
     )
 
     if not result["ok"]:
         # Si no hay datos (ej. agente no encontrado en reporte), devolvemos ceros
+        # O si la API de ElevenLabs falla (como el 404 que vimos)
+        print(f"Error al obtener datos de consumo: {result.get('error', 'Error desconocido')}")
         consumption_data = {"calls": 0, "credits": 0, "minutes": 0}
     else:
         # Usamos los campos normalizados de nuestro helper
