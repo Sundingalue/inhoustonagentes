@@ -42,7 +42,7 @@ def get_eleven_agents(): return _eleven_request("GET", "/convai/agents")
 def get_eleven_phone_numbers(): return _eleven_request("GET", "/convai/phone-numbers")
 
 # ===================================================================
-# === FUNCIÓN CON COMPARACIÓN SIMPLIFICADA Y LOGGING =============
+# === FUNCIÓN CON COMPARACIÓN DETALLADA Y LOGGING =================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     print(f"[ElevenLabs] Obteniendo conversaciones ANTES de {end_unix_ts} para Agente ID: {agent_id}...")
@@ -66,10 +66,12 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     if page_num > max_pages: print(f"[EL] WARN: Límite {max_pages} pág.")
     print(f"[EL] Recibidas ANTES filtrar: {len(all_conversations)}")
 
-    # --- FILTRADO LOCAL (SIMPLIFICADO Y CON LOGS) ---
+    # --- FILTRADO LOCAL (CON LOGS DETALLADOS) ---
     filtered_conversations = []
     start_filter_ts_int = int(start_unix_ts) # Tu fecha "Desde" como número
 
+    print(f"DEBUG: Iniciando filtrado local con start_filter_ts_int = {start_filter_ts_int}") # Log extra
+    
     for convo in all_conversations:
          if isinstance(convo, dict):
              # Leer directamente el campo que sabemos existe
@@ -79,18 +81,29 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
              # Convertir a int de forma segura
              convo_start_num = None
              if convo_start_value is not None:
-                 try: convo_start_num = int(convo_start_value)
-                 except (ValueError, TypeError): pass # Si no es número, se queda None
+                 try:
+                     # Intentar convertir a float primero por si tuviera decimales, luego a int
+                     convo_start_num = int(float(convo_start_value))
+                 except (ValueError, TypeError):
+                     print(f"DEBUG WARNING: Valor de timestamp no numérico: '{convo_start_value}' para convo {convo_id}")
+                     pass # Si no es número, se queda None
 
-             # *** Loggear la comparación ***
-             print(f"DEBUG: Comparando convo {convo_id}: timestamp={convo_start_num} >= filtro={start_filter_ts_int} ?")
+             # *** Loggear la comparación DETALLADAMENTE ***
+             print(f"DEBUG: Comparando convo {convo_id}: timestamp={convo_start_num} (tipo: {type(convo_start_num)}) >= filtro={start_filter_ts_int} (tipo: {type(start_filter_ts_int)})?")
 
              # Hacer la comparación solo si ambos son números válidos
-             if convo_start_num is not None and convo_start_num >= start_filter_ts_int:
+             # Añadimos chequeo explícito de tipo int
+             if isinstance(convo_start_num, int) and isinstance(start_filter_ts_int, int) and convo_start_num >= start_filter_ts_int:
                  print(f"DEBUG: --> SÍ, incluir.")
                  filtered_conversations.append(convo)
              else:
-                 print(f"DEBUG: --> NO, excluir.")
+                 # Loggear por qué se excluyó
+                 if not isinstance(convo_start_num, int):
+                     print(f"DEBUG: --> NO, excluir (timestamp inválido o None)")
+                 elif not isinstance(start_filter_ts_int, int):
+                      print(f"DEBUG: --> NO, excluir (filtro inválido)") # No debería pasar
+                 else:
+                     print(f"DEBUG: --> NO, excluir (timestamp {convo_start_num} es MENOR que filtro {start_filter_ts_int})")
 
 
     print(f"[EL] DESPUÉS filtrar ({start_filter_ts_int}): {len(filtered_conversations)}")
