@@ -294,18 +294,14 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
                 if key != 'phone_number':
-                    # --- LÓGICA DE NORMALIZACIÓN A MINÚSCULAS ---
-                    # Elimina guiones bajos y deja solo la palabra en minúsculas
+                    # --- LÓGICA FINAL: FORZAR A MINÚSCULAS PARA EL CÓDIGO PYTHON ---
                     clean_key = key.replace('_', '') 
                     
                     if clean_key == 'name':
-                        # Forzar la clave a 'name' (minúscula)
-                        recipient_info['name'] = str(value) 
+                        recipient_info['name'] = str(value) # Enviado como 'name'
                     elif clean_key == 'lastname':
-                        # Forzar la clave a 'last_name' (minúscula)
-                        recipient_info['last_name'] = str(value) 
+                        recipient_info['last_name'] = str(value) # Enviado como 'last_name'
                     elif key != 'phone_number':
-                        # Otras columnas (en minúscula)
                         recipient_info[clean_key] = str(value)
             
             recipients.append(recipient_info)
