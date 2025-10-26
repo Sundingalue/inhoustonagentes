@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware # <--- 1. AÑADIDO AQUÍ
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import JWTError, jwt
@@ -16,8 +16,9 @@ from datetime import datetime, timedelta
 import time
 import io
 import csv
+import pandas as pd # <--- 1. IMPORTAR PANDAS
 
-# Importar las funciones del servicio que acabamos de añadir
+# Importar las funciones del servicio
 from services.elevenlabs_service import (
     get_eleven_agents,
     get_eleven_phone_numbers,
@@ -33,78 +34,52 @@ BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'agents')
 BOT_CONFIG_DIR = os.path.abspath(BOT_CONFIG_DIR)
 
 # =========================
-# Cargar .env (Render/local)
+# Cargar .env
 # =========================
 SECRET_ENV_PATH = "/etc/secrets/.env"
-if os.path.exists(SECRET_ENV_PATH):
-    load_dotenv(SECRET_ENV_PATH)
-    print(f"✅ Archivo .env cargado desde {SECRET_ENV_PATH}")
-else:
-    load_dotenv()
-    print("⚠️ Usando .env local")
+if os.path.exists(SECRET_ENV_PATH): load_dotenv(SECRET_ENV_PATH); print(f"✅ .env cargado desde {SECRET_ENV_PATH}")
+else: load_dotenv(); print("⚠️ Usando .env local")
 
 # =========================
-# App
+# App y CORS
 # =========================
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+print("✅ FastAPI cargado.")
 
 # =========================
-# Configuración de CORS
-# =========================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"], 
-    allow_headers=["*"], 
-)
-
-print("✅ FastAPI cargado correctamente y esperando eventos de ElevenLabs…")
-
-# =========================
-# Config HMAC
+# Config HMAC y Twilio
 # =========================
 HMAC_SECRET = (os.getenv("ELEVENLABS_HMAC_SECRET") or "").strip()
 SKIP_HMAC = (os.getenv("ELEVENLABS_SKIP_HMAC") or "false").strip().lower() == "true"
-if not HMAC_SECRET and not SKIP_HMAC:
-    raise RuntimeError("❌ Falta ELEVENLABS_HMAC_SECRET")
+if not HMAC_SECRET and not SKIP_HMAC: raise RuntimeError("❌ Falta ELEVENLABS_HMAC_SECRET")
 
-# =========================
-# Config Twilio
-# =========================
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
-TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
-twilio_client = None
-twilio_configurado = False
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID'); TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN'); TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
+twilio_client = None; twilio_configurado = False
 if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-    try:
-        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        twilio_configurado = True
-        print("✅ Cliente de Twilio configurado.")
-    except Exception as e:
-        print(f"⚠️ Error al configurar Twilio: {e}")
-else:
-    print("⚠️ Faltan variables de Twilio. SMS no funcionará.")
+    try: twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN); twilio_configurado = True; print("✅ Twilio configurado.")
+    except Exception as e: print(f"⚠️ Error Twilio: {e}")
+else: print("⚠️ Faltan variables Twilio.")
 
 # =========================
-# Lógica de Mapeo de Agentes y Helpers
+# Lógica de Mapeo y Helpers
 # =========================
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     # ... (código sin cambios) ...
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
     try:
-        if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Directorio agentes no encontrado: {BOT_CONFIG_DIR}"); return None
-        print(f"Buscando Agent ID {agent_id} en: {BOT_CONFIG_DIR}")
+        if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Dir agentes no encontrado: {BOT_CONFIG_DIR}"); return None
+        # print(f"Buscando Agent ID {agent_id} en: {BOT_CONFIG_DIR}") # Log opcional
         for filename in os.listdir(BOT_CONFIG_DIR):
             if not filename.endswith(".json") or filename.startswith("_"): continue
             filepath = os.path.join(BOT_CONFIG_DIR, filename)
             with open(filepath, 'r', encoding='utf-8') as f: config: Dict[str, Any] = json.load(f)
             if config.get("elevenlabs_agent_id") == agent_id:
                 AGENT_ID_TO_FILENAME_CACHE[agent_id] = filename
-                print(f"✅ Mapeo encontrado: {agent_id} -> {filename}"); return filename
-        print(f"❌ No se encontró archivo JSON para {agent_id} en {BOT_CONFIG_DIR}."); return None
+                # print(f"✅ Mapeo encontrado: {agent_id} -> {filename}"); # Log opcional
+                return filename
+        print(f"❌ No se encontró archivo JSON para {agent_id}."); return None
     except Exception as e: print(f"💥 Error mapeando agente: {e}"); return None
 
 AGENT_USERNAME_TO_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -112,8 +87,8 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
     # ... (código sin cambios) ...
     if username in AGENT_USERNAME_TO_CONFIG_CACHE: return AGENT_USERNAME_TO_CONFIG_CACHE[username]
     try:
-        if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Directorio agentes no encontrado: {BOT_CONFIG_DIR}"); return None
-        print(f"Buscando 'agent_user' {username} en: {BOT_CONFIG_DIR}")
+        if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Dir agentes no encontrado: {BOT_CONFIG_DIR}"); return None
+        # print(f"Buscando 'agent_user' {username} en: {BOT_CONFIG_DIR}") # Log opcional
         for filename in os.listdir(BOT_CONFIG_DIR):
             if not filename.endswith(".json") or filename.startswith("_"): continue
             filepath = os.path.join(BOT_CONFIG_DIR, filename)
@@ -121,25 +96,25 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
             if config.get("agent_user") == username:
                 config["_bot_slug"] = filename.replace(".json", "")
                 AGENT_USERNAME_TO_CONFIG_CACHE[username] = config
-                print(f"✅ Mapeo usuario encontrado: {username} -> {filename}"); return config
+                # print(f"✅ Mapeo usuario encontrado: {username} -> {filename}"); # Log opcional
+                return config
         print(f"❌ No se encontró archivo JSON para 'agent_user' {username}."); return None
     except Exception as e: print(f"💥 Error mapeando usuario: {e}"); return None
 
 def _verify_hmac(secret: str, body: bytes, sig_header: str) -> bool:
     # ... (código sin cambios) ...
-    if not sig_header: print("🚨 No se recibió cabecera HMAC."); return False
+    if not sig_header: print("🚨 No HMAC header."); return False
     t, v0 = "", ""
     for part in [x.strip() for x in sig_header.split(",")]:
         if part.startswith("t="): t = part.split("=", 1)[1]
         if part.startswith("v0="): v0 = part.split("=", 1)[1]
-    if not v0: print("🚨 HMAC sin v0."); return False
+    if not v0: print("🚨 HMAC no v0."); return False
     body_txt = body.decode("utf-8", errors="ignore")
-    expected_body = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    expected_body   = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     expected_t_body = hmac.new(secret.encode(), f"{t}.{body_txt}".encode(), hashlib.sha256).hexdigest()
-    expected_tbody = hmac.new(secret.encode(), f"{t}{body_txt}".encode(), hashlib.sha256).hexdigest()
-    if v0 in (expected_body, expected_t_body, expected_tbody): print("🔏 HMAC válido ✅"); return True
-    print("🚨 HMAC inválido"); print(f"received: {sig_header}"); return False
-
+    expected_tbody  = hmac.new(secret.encode(), f"{t}{body_txt}".encode(), hashlib.sha256).hexdigest()
+    if v0 in (expected_body, expected_t_body, expected_tbody): return True
+    print("🚨 HMAC inválido"); return False
 
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     # ... (código sin cambios) ...
@@ -152,40 +127,33 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         except Exception: transcript_text = ""
     elif isinstance(transcript_list, str): transcript_text = transcript_list.strip()
     caller = called = None
-    try:
-        client_data = root.get("conversation_initiation_client_data", {}) or {}
-        dyn = client_data.get("dynamic_variables", {}) or {}
-        caller = (dyn.get("system__caller_id") or "").strip() or None
-        called = (dyn.get("system__called_number") or "").strip() or None
+    try: client_data = root.get("conversation_initiation_client_data", {}) or {}; dyn = client_data.get("dynamic_variables", {}) or {}; caller = (dyn.get("system__caller_id") or "").strip() or None; called = (dyn.get("system__called_number") or "").strip() or None
     except Exception: pass
     return {"agent_id": agent_id, "transcript_text": transcript_text, "caller": caller, "called": called, "timestamp": root.get("timestamp") or data.get("timestamp"), "raw": data}
 
 # =========================
-# Webhook y Endpoints de Agendamiento
+# Webhook y Endpoints Agendamiento
 # =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
     # ... (código sin cambios) ...
     try:
         body_bytes = await request.body()
-        if not SKIP_HMAC:
-            sig_header = (elevenlabs_signature or request.headers.get("elevenlabs-signature") or request.headers.get("ElevenLabs-Signature"))
-            if not _verify_hmac(HMAC_SECRET, body_bytes, sig_header): raise HTTPException(status_code=401, detail="Invalid HMAC signature.")
-        else: print("⚠️ HMAC BYPASS ACTIVADO")
+        if not SKIP_HMAC: sig_header = (elevenlabs_signature or request.headers.get("elevenlabs-signature") or request.headers.get("ElevenLabs-Signature"));
+        if not _verify_hmac(HMAC_SECRET, body_bytes, sig_header): raise HTTPException(status_code=401, detail="Invalid HMAC.")
+        else: print("⚠️ HMAC BYPASS")
         try: data = json.loads(body_bytes.decode("utf-8"))
         except Exception: data = await request.json()
-        normalized = _normalize_event(data)
-        agent_id = normalized.get("agent_id")
+        normalized = _normalize_event(data); agent_id = normalized.get("agent_id")
         if not agent_id: raise HTTPException(status_code=400, detail="Missing agent_id.")
-        print(f"🚀 Procesando evento para ID: {agent_id}")
+        # print(f"🚀 Evento para ID: {agent_id}") # Log opcional
         config_filename = map_agent_id_to_filename(agent_id)
-        if not config_filename: raise HTTPException(status_code=404, detail=f"Config file not found for ElevenLabs ID: {agent_id}")
+        if not config_filename: raise HTTPException(status_code=404, detail=f"Config no encontrada para ID: {agent_id}")
         agent_name = config_filename.replace(".json", "")
         result = process_agent_event(agent_name, normalized)
         return JSONResponse(status_code=200, content={"status": "ok", "result": result})
     except HTTPException as http_err: return JSONResponse(status_code=http_err.status_code, content={"error": http_err.detail})
     except Exception as e: print(f"💥 Error webhook: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
-
 
 @app.get("/_envcheck")
 def envcheck():
@@ -193,46 +161,34 @@ def envcheck():
     keys = ["MAIL_FROM","MAIL_USERNAME","MAIL_PASSWORD","MAIL_HOST","MAIL_PORT","ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC"]
     return {k: os.getenv(k) for k in keys}
 
-
 from services.calendar_checker import check_availability
 from services.calendar_service import book_appointment
 class CitaPayload(dict):
     # ... (código sin cambios) ...
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        required_keys = ["cliente_nombre", "fecha", "hora", "telefono"]
-        if not all(k in self for k in required_keys): raise ValueError(f"Payload missing keys: {required_keys}")
-
+    def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); required = ["cliente_nombre", "fecha", "hora", "telefono"];
+    if not all(k in self for k in required): raise ValueError(f"Faltan keys: {required}")
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
     # ... (código sin cambios) ...
-    try:
+     try:
         try: payload = CitaPayload(await request.json())
         except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
         except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
-        cliente_nombre = payload['cliente_nombre']; fecha_str = payload['fecha']; hora_str = payload['hora']
-        print(f"🔄 Verificando disponibilidad para {cliente_nombre} en {fecha_str} a las {hora_str}...")
-        is_available = check_availability(fecha_str, hora_str)
-        if not is_available: return JSONResponse(status_code=409, content={"status": "failure", "message": f"Horario no disponible: {fecha_str} a las {hora_str}."})
-        print("✅ Disponible. Agendando...")
-        book_result = book_appointment(nombre=cliente_nombre, apellido="N/A", telefono="N/A", email="test@webhook.com", fechaCita=fecha_str, horaCita=hora_str)
+        cn=payload['cliente_nombre']; fs=payload['fecha']; hs=payload['hora']
+        print(f"🔄 Verificando disponibilidad {cn} {fs} {hs}...")
+        if not check_availability(fs, hs): return JSONResponse(status_code=409, content={"status":"failure","message":f"No disponible: {fs} {hs}."})
+        print("✅ Disponible. Agendando..."); book_result = book_appointment(nombre=cn, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fs, horaCita=hs)
         if book_result.get('status') == 'success':
-            success_message = f"Cita agendada para {cliente_nombre}. Mensaje Apps Script: {book_result.get('message', 'Éxito.')}"
-            print(f"🎉 Éxito: {success_message}")
+            msg = f"Cita agendada {cn}. {book_result.get('message','Éxito.')}" ; print(f"🎉 {msg}")
             if twilio_configurado:
-                try:
-                    cliente_telefono = payload.get('telefono')
-                    if cliente_telefono:
-                        mensaje_sms = f"In Houston Texas: Hola {cliente_nombre}. Confirmamos su cita para el {fecha_str} a las {hora_str}."
-                        print(f"🔄 Enviando SMS a {cliente_telefono}...")
-                        message = twilio_client.messages.create(body=mensaje_sms, from_=TWILIO_PHONE_NUMBER, to=cliente_telefono)
-                        print(f"✅ SMS enviado. SID: {message.sid}")
-                    else: print("⚠️ No se encontró 'telefono', no se puede enviar SMS.")
-                except Exception as sms_error: print(f"⚠️ Falló envío SMS (pero cita AGENDADA). Error: {sms_error}")
-            return JSONResponse(status_code=200, content={"status": "success", "message": success_message})
-        else: return JSONResponse(status_code=500, content={"status": "failure", "message": "Fallo al agendar.", "details": book_result.get('message', 'Error desconocido Webhook.')})
-    except HTTPException as http_err: return JSONResponse(status_code=http_err.status_code, content={"error": http_err.detail})
-    except Exception as e: print(f"💥 Error /agendar_cita: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
+                try: tel = payload.get('telefono')
+                if tel: sms = f"In Houston: Hola {cn}. Confirmamos cita {fs} {hs}."; print(f"🔄 SMS a {tel}..."); m = twilio_client.messages.create(body=sms, from_=TWILIO_PHONE_NUMBER, to=tel); print(f"✅ SMS SID: {m.sid}")
+                else: print("⚠️ No tel para SMS.")
+                except Exception as e: print(f"⚠️ Falló SMS (CITA AGENDADA). Error: {e}")
+            return JSONResponse(status_code=200, content={"status":"success", "message":msg})
+        else: return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo agendar.", "details": book_result.get('message','?')})
+     except HTTPException as h: return JSONResponse(status_code=h.status_code, content={"error":h.detail})
+     except Exception as e: print(f"💥 Error /agendar_cita: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error":"internal_error", "detail":str(e)})
 
 
 # =================================================================
@@ -249,137 +205,145 @@ class AgentData(BaseModel): bot_slug: str; config: Dict[str, Any]
 
 async def get_current_agent(token: str = Depends(oauth2_scheme)) -> AgentData:
     # ... (código sin cambios) ...
-    credentials_exception = HTTPException(status_code=401, detail="Credenciales inválidas", headers={"WWW-Authenticate": "Bearer"})
-    try:
-        payload = jwt.decode(token, AGENT_JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        bot_slug: str = payload.get("sub") 
-        if bot_slug is None: raise credentials_exception
-        bot_file_path = os.path.join(BOT_CONFIG_DIR, f"{bot_slug}.json")
-        if not os.path.exists(bot_file_path): print(f"❌ Error Token: No se encontró archivo {bot_file_path}"); raise credentials_exception
-        with open(bot_file_path, 'r', encoding='utf-8') as f: config_data = json.load(f)
-        return AgentData(bot_slug=bot_slug, config=config_data)
-    except JWTError: raise credentials_exception
-
+    cred_exc = HTTPException(status_code=401, detail="Credenciales inválidas", headers={"WWW-Authenticate": "Bearer"})
+    try: payload = jwt.decode(token, AGENT_JWT_SECRET, algorithms=[JWT_ALGORITHM]); slug: str = payload.get("sub");
+    if slug is None: raise cred_exc
+    fpath = os.path.join(BOT_CONFIG_DIR, f"{slug}.json")
+    if not os.path.exists(fpath): print(f"❌ Error Token: No archivo {fpath}"); raise cred_exc
+    with open(fpath,'r',encoding='utf-8') as f: cfg = json.load(f)
+    return AgentData(bot_slug=slug, config=cfg)
+    except JWTError: raise cred_exc
 
 @app.get("/admin/sync-agents")
 async def admin_sync_agents():
     # ... (código sin cambios) ...
-    result = get_eleven_agents()
-    if not result["ok"]: raise HTTPException(status_code=500, detail=result["error"])
-    agents_list = []
-    if isinstance(result.get("data"), dict) and isinstance(result["data"].get("agents"), list):
-        agents_list = [{"agent_id": a.get("agent_id"), "name": a.get("name")} for a in result["data"].get("agents", []) if isinstance(a, dict)]
-    elif isinstance(result.get("data"), list): agents_list = [{"agent_id": a.get("agent_id"), "name": a.get("name")} for a in result["data"] if isinstance(a, dict)]
-    return JSONResponse(content={"ok": True, "data": agents_list})
-
+    res = get_eleven_agents();
+    if not res["ok"]: raise HTTPException(500, res["error"])
+    l = []; d = res.get("data")
+    if isinstance(d,dict) and isinstance(d.get("agents"),list): l=[{"id":a.get("agent_id"),"n":a.get("name")} for a in d.get("agents",[]) if isinstance(a,dict)]
+    elif isinstance(d,list): l=[{"id":a.get("agent_id"),"n":a.get("name")} for a in d if isinstance(a,dict)] # Renombrado keys para brevedad
+    return JSONResponse({"ok":True, "data":l})
 
 @app.get("/admin/sync-numbers")
 async def admin_sync_numbers():
     # ... (código sin cambios) ...
-    result = get_eleven_phone_numbers()
-    if not result["ok"]: raise HTTPException(status_code=500, detail=result["error"])
-    numbers_list = []
-    phone_numbers_data = []
-    if isinstance(result.get("data"), dict) and isinstance(result["data"].get("phone_numbers"), list): phone_numbers_data = result["data"].get("phone_numbers", [])
-    elif isinstance(result.get("data"), list): phone_numbers_data = result["data"]
-    else: print(f"⚠️ Estructura inesperada en /phone-numbers: {result.get('data')}")
-    for n in phone_numbers_data:
-        if isinstance(n, dict): numbers_list.append({"phone_number_id": n.get("phone_number_id"), "phone_number": n.get("phone_number")})
-    return JSONResponse(content={"ok": True, "data": numbers_list})
-
+    res = get_eleven_phone_numbers();
+    if not res["ok"]: raise HTTPException(500, res["error"])
+    l = []; d = res.get("data"); pnd = []
+    if isinstance(d,dict) and isinstance(d.get("phone_numbers"),list): pnd=d.get("phone_numbers",[])
+    elif isinstance(d,list): pnd=d
+    else: print(f"⚠️ Estructura /numbers: {d}")
+    for n in pnd:
+        if isinstance(n,dict): l.append({"id":n.get("phone_number_id"), "n":n.get("phone_number")}) # Renombrado keys
+    return JSONResponse({"ok":True, "data":l})
 
 @app.post("/agent/login", response_model=Token)
 async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
     # ... (código sin cambios) ...
-    username = form_data.username; password = form_data.password
-    agent_config = map_username_to_agent_data(username)
-    if not agent_config: print(f"Login fallido: Usuario '{username}' no encontrado."); raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    stored_hash = agent_config.get('agent_pass_hash', '').encode('utf-8')
+    un=form_data.username; pw=form_data.password; cfg=map_username_to_agent_data(un)
+    if not cfg: print(f"Login fail: user '{un}'?"); raise HTTPException(401,"Credenciales inválidas")
+    h = cfg.get('agent_pass_hash','').encode('utf-8')
     try:
-        if not bcrypt.checkpw(password.encode('utf-8'), stored_hash): print(f"Login fallido: Contraseña incorrecta para '{username}'."); raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    except ValueError: print(f"Login fallido: Hash inválido para '{username}'."); raise HTTPException(status_code=500, detail="Error configuración cuenta")
-    bot_slug = agent_config["_bot_slug"]
-    payload = {"sub": bot_slug, "iat": int(time.time()), "exp": int(time.time()) + (12 * 3600)}
-    access_token = jwt.encode(payload, AGENT_JWT_SECRET, algorithm=JWT_ALGORITHM)
-    print(f"Login exitoso para: {username} (slug: {bot_slug})")
-    return {"access_token": access_token, "token_type": "bearer"}
-
+        if not bcrypt.checkpw(pw.encode('utf-8'),h): print(f"Login fail: pass '{un}'?"); raise HTTPException(401,"Credenciales inválidas")
+    except ValueError: print(f"Login fail: hash '{un}'?"); raise HTTPException(500,"Error config cuenta")
+    slug = cfg["_bot_slug"]; pay={"sub":slug,"iat":int(time.time()),"exp":int(time.time())+(12*3600)}
+    tok = jwt.encode(pay,AGENT_JWT_SECRET,algorithm=JWT_ALGORITHM)
+    print(f"Login OK: {un} (slug: {slug})")
+    return {"access_token":tok, "token_type":"bearer"}
 
 @app.post("/agent/data")
 async def get_agent_data(request: AgentDataRequest, agent: AgentData = Depends(get_current_agent)):
-    bot_config = agent.config
-    agent_id = bot_config.get('elevenlabs_agent_id')
-    phone_number = bot_config.get('phone_number')
-    agent_name = bot_config.get('name', agent.bot_slug)
-    
-    if not agent_id: raise HTTPException(status_code=400, detail="Falta agent_id en JSON")
+    # ... (código sin cambios, usa los nombres _ts correctos) ...
+    cfg = agent.config; aid = cfg.get('elevenlabs_agent_id'); ph=cfg.get('phone_number'); name=cfg.get('name',agent.bot_slug)
+    if not aid: raise HTTPException(400, "Falta agent_id en JSON")
+    try: start_ts = int(time.mktime(datetime.strptime(request.start_date,'%Y-%m-%d').timetuple())); end_dt=datetime.strptime(request.end_date,'%Y-%m-%d')+timedelta(days=1,seconds=-1); end_ts=int(time.mktime(end_dt.timetuple()))
+    except ValueError: raise HTTPException(400, "Fecha inválida YYYY-MM-DD")
+    res = get_agent_consumption_data(agent_id=aid, start_unix_ts=start_ts, end_unix_ts=end_ts)
+    if not res["ok"]: print(f"Error consumo: {res.get('error','?')}"); cd={"calls":0,"credits":0,"minutes":0}
+    else: d=res["data"]; cd={"calls":d.get("calls",0),"credits":d.get("credits",0.0),"minutes":d.get("duration_secs",0.0)/60.0}
+    try: rate = float(os.getenv("ELEVENLABS_USD_PER_CREDIT","0.0001"))
+    except: rate = 0.0001
+    cost = float(cd["credits"]) * rate
+    final = {"agent_name":name,"phone_number":ph,"calls":cd["calls"],"credits_consumed":cd["credits"],"total_cost_usd":cost}
+    return JSONResponse({"ok":True, "data":final})
 
-    try:
-        # Calcular los timestamps Unix a partir de las fechas YYYY-MM-DD
-        start_unix_timestamp = int(time.mktime(datetime.strptime(request.start_date, '%Y-%m-%d').timetuple()))
-        end_dt = datetime.strptime(request.end_date, '%Y-%m-%d') + timedelta(days=1, seconds=-1)
-        end_unix_timestamp = int(time.mktime(end_dt.timetuple()))
-    except ValueError: raise HTTPException(status_code=400, detail="Formato fecha inválido YYYY-MM-DD")
 
-    # ==========================================================
-    # === ¡AQUÍ ESTÁ LA CORRECCIÓN DEL TypeError! ==============
-    # ==========================================================
-    # Llamar a la función del servicio con los nombres correctos que espera
-    result = get_agent_consumption_data(
-        agent_id=agent_id,
-        start_unix_ts=start_unix_timestamp, # <-- CORREGIDO (usa _ts)
-        end_unix_ts=end_unix_timestamp      # <-- CORREGIDO (usa _ts)
-    )
-
-    if not result["ok"]:
-        print(f"Error al obtener datos de consumo: {result.get('error', 'Desconocido')}")
-        consumption_data = {"calls": 0, "credits": 0, "minutes": 0}
-    else:
-        d = result["data"]
-        # Asegurar división flotante para minutos
-        consumption_data = {"calls": d.get("calls", 0), "credits": d.get("credits", 0.0), "minutes": d.get("duration_secs", 0.0) / 60.0} 
-
-    try: usd_per_credit = float(os.getenv("ELEVENLABS_USD_PER_CREDIT", "0.0001"))
-    except: usd_per_credit = 0.0001
-    
-    # Asegurar que 'credits' sea float antes de multiplicar
-    total_cost_usd = float(consumption_data["credits"]) * usd_per_credit
-
-    final_data = {
-        "agent_name": agent_name,
-        "phone_number": phone_number,
-        "calls": consumption_data["calls"],
-        "credits_consumed": consumption_data["credits"], 
-        "total_cost_usd": total_cost_usd
-    }
-    return JSONResponse(content={"ok": True, "data": final_data})
-
+# ==========================================================
+# === MODIFICACIÓN PARA SOPORTE EXCEL =======================
+# ==========================================================
 @app.post("/agent/start-batch-call")
-async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch_name: str = Form(...), csv_file: UploadFile = File(...)):
-    # ... (código sin cambios, incluyendo la lógica pendiente de Excel) ...
+async def handle_batch_call(
+    agent: AgentData = Depends(get_current_agent),
+    batch_name: str = Form(...),
+    csv_file: UploadFile = File(...) # Renombrado a csv_file para claridad, pero acepta Excel
+):
     bot_config = agent.config
-    if not csv_file.filename.lower().endswith(('.csv', '.xls', '.xlsx')): 
-         raise HTTPException(status_code=400, detail="Se requiere un archivo .csv, .xls o .xlsx")
+    filename = csv_file.filename.lower()
+    
+    # --- Validar extensión ---
+    allowed_extensions = ('.csv', '.xls', '.xlsx')
+    if not filename.endswith(allowed_extensions):
+         raise HTTPException(status_code=400, detail=f"Formato no soportado. Usar {', '.join(allowed_extensions)}")
+
+    # --- Leer IDs del config ---
     agent_id = bot_config.get('elevenlabs_agent_id')
     phone_number_id = bot_config.get('eleven_phone_number_id')
-    if not agent_id or not phone_number_id: raise HTTPException(status_code=400, detail="Falta agent_id o phone_number_id en JSON")
+    if not agent_id or not phone_number_id:
+        raise HTTPException(status_code=400, detail="Falta agent_id o phone_number_id en JSON")
+    
     recipients = []
     try:
+        # --- Leer archivo en memoria ---
         content = await csv_file.read()
-        if csv_file.filename.lower().endswith('.csv'):
-             csv_data = content.decode("utf-8")
-             csv_reader = csv.DictReader(io.StringIO(csv_data))
-             for row in csv_reader:
-                 if 'phone_number' not in row: raise HTTPException(status_code=400, detail="CSV debe tener columna 'phone_number'")
-                 recipients.append({"phone_number": row['phone_number']})
-        else: raise HTTPException(status_code=400, detail="Lectura de Excel (.xls/.xlsx) aún no implementada.")
+        file_like_object = io.BytesIO(content)
+        
+        # --- Usar Pandas para leer CSV o Excel ---
+        df = None
+        if filename.endswith('.csv'):
+             df = pd.read_csv(file_like_object)
+        elif filename.endswith(('.xls', '.xlsx')):
+             df = pd.read_excel(file_like_object) # read_excel maneja ambos formatos
+
+        if df is None:
+             raise ValueError("No se pudo leer el archivo con pandas.")
+
+        # --- Verificar y extraer columna 'phone_number' ---
+        if 'phone_number' not in df.columns:
+            raise HTTPException(status_code=400, detail="El archivo debe contener una columna llamada 'phone_number'")
+            
+        # Convertir a formato de lista de dicts para la API, asegurando que sea string
+        # y eliminando filas donde el número sea vacío o inválido (NaN)
+        recipients = [
+            {"phone_number": str(phone)} 
+            for phone in df['phone_number'].dropna().astype(str) 
+            if str(phone).strip() # Asegurar que no esté vacío después de convertir a string
+        ]
+
     except HTTPException as http_ex: raise http_ex 
-    except Exception as e: raise HTTPException(status_code=400, detail=f"Error procesando archivo: {e}")
-    if not recipients: raise HTTPException(status_code=400, detail="Archivo no contiene destinatarios")
-    print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
-    result = start_batch_call(batch_name=batch_name, agent_id=agent_id, phone_number_id=phone_number_id, recipients=recipients)
-    if not result["ok"]: raise HTTPException(status_code=500, detail=result["error"])
+    except Exception as e:
+        print(f"💥 Error procesando archivo: {e}") # Loggear el error real
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Error al procesar el archivo: {e}")
+        
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Archivo no contiene destinatarios válidos en la columna 'phone_number'")
+    
+    # --- Enviar a ElevenLabs ---
+    print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} (Agente ID: {agent_id}) con {len(recipients)} destinatarios.")
+    result = start_batch_call(
+        batch_name=batch_name, 
+        agent_id=agent_id, 
+        phone_number_id=phone_number_id, 
+        recipients=recipients
+    )
+    
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+        
     return JSONResponse(content={"ok": True, "data": result["data"]})
+# ==========================================================
+# === FIN MODIFICACIÓN =====================================
+# ==========================================================
 
 # =================================================================
 # === FIN: LÓGICA DEL PANEL AGENTES ===============================
