@@ -1,5 +1,6 @@
 import os
 import requests
+import json # Importar JSON para imprimir bonito
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
@@ -110,7 +111,7 @@ def get_eleven_phone_numbers():
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
 # ===================================================================
-# === FUNCIÓN CON DEPURACIÓN ========================================
+# === FUNCIÓN CON DEPURACIÓN (IMPRIME EL OBJETO) ====================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
@@ -160,14 +161,25 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
         data = result.get("data", {})
         conversations_page = data.get("conversations", [])
         
-        # +++++ LÍNEAS DE DEPURACIÓN CLAVE +++++
         page_has_more = data.get("has_more", False)
         page_last_convo_id = data.get("last_conversation_id", None)
         print(f"DEBUG: Página {page_num} recibida.")
         print(f"DEBUG: Conversaciones en esta página: {len(conversations_page)}")
         print(f"DEBUG: API dice 'has_more': {page_has_more}")
         print(f"DEBUG: API dice 'last_conversation_id': {page_last_convo_id}")
+        
+        
+        # +++++ LÍNEA DE DEPURACIÓN CRÍTICA +++++
+        if conversations_page and page_num == 1:
+            try:
+                print("DEBUG: ================== INICIO DE LA PRIMERA CONVERSACIÓN ==================")
+                # Imprimimos la primera conversación en un formato legible
+                print(json.dumps(conversations_page[0], indent=2))
+                print("DEBUG: =================== FIN DE LA PRIMERA CONVERSACIÓN ====================")
+            except Exception as e:
+                print(f"DEBUG: Error al imprimir el objeto de conversación: {e}")
         # +++++++++++++++++++++++++++++++++++++++
+        
         
         if not conversations_page and page_num == 1:
             print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
@@ -182,8 +194,8 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
                 total_seconds += convo.get("duration_secs", 0)
 
         # --- Preparar el siguiente bucle ---
-        has_more = page_has_more # Actualizamos el 'has_more' del bucle
-        last_convo_id = page_last_convo_id # Actualizamos el cursor
+        has_more = page_has_more 
+        last_convo_id = page_last_convo_id 
         page_num += 1
         
         if not has_more:
@@ -191,8 +203,22 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
             break
             
         if not last_convo_id:
-            print("DEBUG: 'last_conversation_id' es None. Saliendo del bucle para evitar loop infinito.")
-            break
+            # ====================================================================
+            # === ¡HIPÓTESIS! Vamos a arreglar la paginación AHORA ================
+            # ====================================================================
+            # Si la API no nos dio un 'last_conversation_id' global,
+            # lo tomaremos del último item de la lista.
+            if conversations_page:
+                last_item = conversations_page[-1] # Obtener el último dict de la lista
+                if isinstance(last_item, dict) and last_item.get("conversation_id"):
+                    last_convo_id = last_item.get("conversation_id")
+                    print(f"DEBUG: 'last_conversation_id' era None. Usando el ID del último item: {last_convo_id}")
+                else:
+                    print("DEBUG: 'last_conversation_id' es None y no se pudo sacar de la lista. Saliendo.")
+                    break # Salir si no podemos obtener el cursor
+            else:
+                print("DEBUG: 'last_conversation_id' es None y la lista está vacía. Saliendo.")
+                break
         
         print(f"[ElevenLabs] Página procesada. Total parcial: {total_calls} llamadas. Pidiendo siguiente página...")
 
