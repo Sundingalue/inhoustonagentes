@@ -106,7 +106,7 @@ def get_eleven_phone_numbers():
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
 # ===================================================================
-# === FUNCIÓN CORREGIDA =============================================
+# === FUNCIÓN CORREGIDA (VERSIÓN INTELIGENTE) =======================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
@@ -153,8 +153,14 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     for convo in conversations:
         if isinstance(convo, dict):
             total_calls += 1
-            # Sumamos los campos de consumo. Usamos .get(campo, 0) por seguridad.
-            total_credits += convo.get("credit_usage", 0) 
+            
+            # ==========================================================
+            # === ¡LA CORRECCIÓN INTELIGENTE ESTÁ AQUÍ! ================
+            # ==========================================================
+            # Intenta encontrar el costo de créditos en CUALQUIERA de estos campos
+            credits = convo.get("credit_usage", convo.get("credits_used", convo.get("credit_cost", 0)))
+            
+            total_credits += credits
             total_seconds += convo.get("duration_secs", 0)
 
     print(f"[ElevenLabs] Consumo total calculado: {total_calls} llamadas, {total_credits} créditos.")
