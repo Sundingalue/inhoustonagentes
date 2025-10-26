@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from workflows.processor import process_agent_event
-import hmac, hashlib, os, json, base64
+import hmac, hashlib, os, json, base64, re # Importar 're' para limpiar nombres de columna
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 import traceback
@@ -66,6 +66,7 @@ else: print("⚠️ Faltan variables Twilio.")
 # =========================
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
+    # ... (código sin cambios) ...
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
     try:
         if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Dir agentes no encontrado: {BOT_CONFIG_DIR}"); return None
@@ -81,6 +82,7 @@ def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
 
 AGENT_USERNAME_TO_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
 def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
+    # ... (código sin cambios) ...
     if username in AGENT_USERNAME_TO_CONFIG_CACHE: return AGENT_USERNAME_TO_CONFIG_CACHE[username]
     try:
         if not os.path.isdir(BOT_CONFIG_DIR): print(f"❌ Dir agentes no encontrado: {BOT_CONFIG_DIR}"); return None
@@ -96,6 +98,7 @@ def map_username_to_agent_data(username: str) -> Optional[Dict[str, Any]]:
     except Exception as e: print(f"💥 Error mapeando usuario: {e}"); return None
 
 def _verify_hmac(secret: str, body: bytes, sig_header: str) -> bool:
+    # ... (código sin cambios) ...
     if not sig_header: print("🚨 No HMAC header."); return False
     t, v0 = "", ""
     for part in [x.strip() for x in sig_header.split(",")]:
@@ -110,6 +113,7 @@ def _verify_hmac(secret: str, body: bytes, sig_header: str) -> bool:
     print("🚨 HMAC inválido"); return False
 
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    # ... (código sin cambios) ...
     root = data.get("data", data) if isinstance(data, dict) else {}
     agent_id = (root.get("agent_id") or (root.get("agent") or {}).get("id") or data.get("agent_id") or None)
     transcript_list = root.get("transcript") or root.get("transcription") or []
@@ -128,6 +132,7 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
+    # ... (código sin cambios) ...
     try:
         body_bytes = await request.body()
         if not SKIP_HMAC: sig_header = (elevenlabs_signature or request.headers.get("elevenlabs-signature") or request.headers.get("ElevenLabs-Signature"));
@@ -147,15 +152,13 @@ async def handle_agent_event(request: Request, elevenlabs_signature: str = Heade
 
 @app.get("/_envcheck")
 def envcheck():
+    # ... (código sin cambios) ...
     keys = ["MAIL_FROM","MAIL_USERNAME","MAIL_PASSWORD","MAIL_HOST","MAIL_PORT","ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC"]
     return {k: os.getenv(k) for k in keys}
 
 from services.calendar_checker import check_availability
 from services.calendar_service import book_appointment
 
-# ==========================================================
-# === CLASE CitaPayload CON CORRECCIÓN FINAL (Indentación) ===
-# ==========================================================
 class CitaPayload(dict):
     """
     Clase simple para validar la estructura del JSON de entrada.
@@ -163,12 +166,8 @@ class CitaPayload(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         required = ["cliente_nombre", "fecha", "hora", "telefono"]
-        # --- La validación AHORA está DENTRO de __init__ ---
         if not all(k in self for k in required):
              raise ValueError(f"Faltan keys: {required}")
-# ==========================================================
-# === FIN CLASE CORREGIDA ==================================
-# ==========================================================
 
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
@@ -180,7 +179,6 @@ async def agendar_cita_endpoint(request: Request):
         except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
         except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
         cn=payload['cliente_nombre']; fs=payload['fecha']; hs=payload['hora']
-        # Corrección menor: asegurar que hs se usa en el log
         print(f"🔄 Verificando disponibilidad {cn} {fs} {hs}...")
         if not check_availability(fs, hs): return JSONResponse(status_code=409, content={"status":"failure","message":f"No disponible: {fs} {hs}."})
         print("✅ Disponible. Agendando..."); book_result = book_appointment(nombre=cn, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fs, horaCita=hs)
@@ -195,7 +193,6 @@ async def agendar_cita_endpoint(request: Request):
                     print(f"⚠️ Falló envío SMS (CITA AGENDADA). Error: {sms_error}")
             return JSONResponse(status_code=200, content={"status":"success", "message":msg})
         else: return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','?')})
-    # Asegurar que los except estén al mismo nivel del try principal
     except HTTPException as h:
         return JSONResponse(status_code=h.status_code, content={"error": h.detail})
     except Exception as e:
@@ -277,33 +274,113 @@ async def get_agent_data(request: AgentDataRequest, agent: AgentData = Depends(g
     final = {"agent_name":name,"phone_number":ph,"calls":cd["calls"],"credits_consumed":cd["credits"],"total_cost_usd":cost}
     return JSONResponse({"ok":True, "data":final})
 
+# ==========================================================
+# === MODIFICACIÓN PARA VARIABLES DINÁMICAS ===============
+# ==========================================================
 @app.post("/agent/start-batch-call")
-async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch_name: str = Form(...), csv_file: UploadFile = File(...)):
-    bot_config = agent.config; filename = csv_file.filename.lower()
+async def handle_batch_call(
+    agent: AgentData = Depends(get_current_agent),
+    batch_name: str = Form(...),
+    csv_file: UploadFile = File(...)
+):
+    bot_config = agent.config
+    filename = csv_file.filename.lower()
     allowed_extensions = ('.csv', '.xls', '.xlsx')
-    if not filename.endswith(allowed_extensions): raise HTTPException(400, f"Formato no soportado. Usar {', '.join(allowed_extensions)}")
-    agent_id = bot_config.get('elevenlabs_agent_id'); phone_number_id = bot_config.get('eleven_phone_number_id')
-    if not agent_id or not phone_number_id: raise HTTPException(400, "Falta agent_id o phone_number_id en JSON")
+    if not filename.endswith(allowed_extensions):
+         raise HTTPException(status_code=400, detail=f"Formato no soportado. Usar {', '.join(allowed_extensions)}")
+
+    agent_id = bot_config.get('elevenlabs_agent_id')
+    phone_number_id = bot_config.get('eleven_phone_number_id')
+    if not agent_id or not phone_number_id:
+        raise HTTPException(status_code=400, detail="Falta agent_id o phone_number_id en JSON")
+
     recipients = []
     try:
-        content = await csv_file.read(); file_like_object = io.BytesIO(content); df = None
-        if filename.endswith('.csv'): df = pd.read_csv(file_like_object)
-        elif filename.endswith(('.xls', '.xlsx')): df = pd.read_excel(file_like_object)
-        if df is None: raise ValueError("No se pudo leer archivo con pandas.")
-        if 'phone_number' not in df.columns: raise HTTPException(400, "Archivo debe tener columna 'phone_number'")
-        recipients = [{"phone_number": str(phone)} for phone in df['phone_number'].dropna().astype(str) if str(phone).strip()]
+        content = await csv_file.read()
+        file_like_object = io.BytesIO(content)
+        df = None
+        if filename.endswith('.csv'):
+             df = pd.read_csv(file_like_object)
+        elif filename.endswith(('.xls', '.xlsx')):
+             # engine='openpyxl' es necesario si pandas tiene problemas detectando xlsx
+             df = pd.read_excel(file_like_object, engine='openpyxl')
+
+        if df is None:
+             raise ValueError("No se pudo leer el archivo con pandas.")
+
+        # --- Limpiar nombres de columnas para usarlos como claves ---
+        # Convertir a minúsculas, reemplazar espacios y caracteres no alfanuméricos con _
+        df.columns = [re.sub(r'\s+', '_', re.sub(r'[^\w\s]', '', col)).lower() for col in df.columns]
+
+        # --- Verificar columna 'phone_number' después de limpiar ---
+        if 'phone_number' not in df.columns:
+            # Intentar buscar columnas comunes como 'telefono', 'teléfono', 'numero', 'número'
+            phone_col_candidates = ['telefono', 'teléfono', 'numero', 'número', 'phone']
+            found_phone_col = None
+            for col in phone_col_candidates:
+                if col in df.columns:
+                    found_phone_col = col
+                    print(f"WARN: No se encontró 'phone_number', usando columna '{found_phone_col}' en su lugar.")
+                    # Renombrar la columna encontrada a 'phone_number' para el resto del código
+                    df.rename(columns={found_phone_col: 'phone_number'}, inplace=True)
+                    break # Salir al encontrar la primera candidata
+
+            if 'phone_number' not in df.columns: # Si aún no se encuentra después de buscar candidatas
+                 raise HTTPException(status_code=400, detail="El archivo debe contener una columna 'phone_number' (o similar como 'telefono')")
+
+        # --- Convertir cada fila a un diccionario ---
+        # Asegurarse que todos los valores sean strings para evitar problemas de tipo JSON
+        df = df.astype(str)
+        # Reemplazar valores 'nan' (resultado común de celdas vacías en Excel) con strings vacíos
+        df.fillna('', inplace=True)
+
+        # Convertir DataFrame a lista de diccionarios
+        recipients_data = df.to_dict(orient='records')
+
+        # --- Validar y formatear cada recipient ---
+        for row_dict in recipients_data:
+            # Asegurar que phone_number es string y no está vacío
+            phone = str(row_dict.get('phone_number', '')).strip()
+            if not phone:
+                continue # Saltar filas sin número de teléfono
+
+            # Crear el diccionario final para esta fila
+            recipient_info = {}
+            for key, value in row_dict.items():
+                 # Asegurar que todas las claves y valores sean strings
+                 recipient_info[str(key)] = str(value)
+
+            # Asegurar que 'phone_number' existe y tiene el valor correcto
+            recipient_info['phone_number'] = phone
+
+            recipients.append(recipient_info)
+
+
     except HTTPException as http_ex: raise http_ex
-    except Exception as e: print(f"💥 Error procesando archivo: {e}"); traceback.print_exc(); raise HTTPException(400, f"Error procesando archivo: {e}")
-    if not recipients: raise HTTPException(400, "Archivo no contiene destinatarios válidos")
-    print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} ({len(recipients)} dest.)")
+    except Exception as e:
+        print(f"💥 Error procesando archivo: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Error al procesar el archivo: {e}")
+
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Archivo no contiene destinatarios válidos")
+
+    # --- Enviar a ElevenLabs ---
+    print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} ({len(recipients)} dest.) con variables: {list(recipients[0].keys()) if recipients else 'ninguna'}")
     result = start_batch_call(
-    call_name=batch_name,
-    agent_id=agent_id,
-    phone_number_id=phone_number_id,
-    recipients_json=recipients # <-- CORRECTED ARGUMENT NAME
-)
-    if not result["ok"]: raise HTTPException(500, result["error"])
-    return JSONResponse({"ok": True, "data": result["data"]})
+        call_name=batch_name,
+        agent_id=agent_id,
+        phone_number_id=phone_number_id,
+        recipients_json=recipients # Pasar la lista completa de diccionarios
+    )
+
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return JSONResponse(content={"ok": True, "data": result["data"]})
+# ==========================================================
+# === FIN MODIFICACIÓN =====================================
+# ==========================================================
 
 # =================================================================
 # === FIN: LÓGICA DEL PANEL AGENTES ===============================
