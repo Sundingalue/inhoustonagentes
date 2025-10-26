@@ -41,7 +41,7 @@ else: load_dotenv(); print("⚠️ Usando .env local")
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 print("✅ FastAPI cargado.")
-HMAC_SECRET = (os.getenv("ELEVENLABS_HMAC_SECRET") or "").strip()
+HMAC_SECRET = os.getenv("ELEVENLABS_HMAC_SECRET", "").strip()
 SKIP_HMAC = (os.getenv("ELEVENLABS_SKIP_HMAC") or "false").strip().lower() == "true"
 if not HMAC_SECRET and not SKIP_HMAC: raise RuntimeError("❌ Falta ELEVENLABS_HMAC_SECRET")
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID'); TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN'); TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
@@ -113,9 +113,6 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception: pass
     return {"agent_id": agent_id, "transcript_text": transcript_text, "caller": caller, "called": called, "timestamp": root.get("timestamp") or data.get("timestamp"), "raw": data}
 
-# =========================
-# Webhook y Endpoints Agendamiento
-# =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
     sig_header = None 
@@ -290,9 +287,11 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             phone = str(row_dict.get('phone_number', '')).strip()
             if not phone: continue
 
+            # Preparar objeto desanidado (todas las variables al mismo nivel)
             recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
                 if key != 'phone_number':
+                    # --- LÓGICA DE NORMALIZACIÓN FINAL: MINÚSCULAS ---
                     clean_key = key.replace('_', '') 
                     
                     if clean_key == 'name':
