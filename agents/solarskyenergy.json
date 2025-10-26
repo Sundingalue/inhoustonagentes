@@ -17,6 +17,18 @@
   "eleven_phone_number_id": "phnum_2401k893e1k5eckrng7qqh185ran", 
   "sheet_id": "1mdnuCn3NXC84dGrD0ellxubcJ02hg7huInq9aKltPvk",
 
+  "realtime": {
+    "voice": "alloy", 
+    "model": "eleven_turbo_v2", 
+    "latency_mode": "low", 
+    "interruptible": true,
+    "backchanneling": ["ajá", "entiendo", "claro"],
+    "humanize_rules": {
+      "avoid_list_tone": true,
+      "insert_small_pauses": true
+    }
+  },
+  
   "workflow": [
     "guardar_en_sheets",
     "enviar_email",
