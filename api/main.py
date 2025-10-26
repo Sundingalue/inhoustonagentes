@@ -655,12 +655,13 @@ async def get_agent_data(
     # 'name' lo guardaremos en el JSON desde WordPress
     agent_name = bot_config.get('name', agent.bot_slug)
     
-    # << CORRECCIÓN CLAVE: LEER LA API KEY DEL JSON >>
-    # El JSON debe tener la API Key de ElevenLabs específica de este cliente
-    api_key = bot_config.get('api_key')
+    # ==========================================================
+    # === ¡CORRECCIÓN! Ya no buscamos api_key aquí =============
+    # ==========================================================
+    # api_key = bot_config.get('api_key') <-- ELIMINADO
 
-    if not agent_id or not api_key: # Verificamos ambos
-        raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs (falta agent_id o api_key en el JSON)")
+    if not agent_id: # <-- CORREGIDO (solo revisa agent_id)
+        raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs (falta agent_id en el JSON)")
 
     # 2. Convertir fechas a Unix
     try:
@@ -673,13 +674,13 @@ async def get_agent_data(
 
     # 3. Consultar la API de consumo (¡Pasando la API Key del cliente!)
     # ==========================================================
-    # === ¡AQUÍ ESTÁ LA CORRECCIÓN! ============================
+    # === ¡CORRECCIÓN! Ya no pasamos client_api_key ===========
     # ==========================================================
     result = get_agent_consumption_data(
         agent_id=agent_id,
-        start_unix=start_unix, # <-- CORREGIDO (antes 'start_timestamp_unix')
-        end_unix=end_unix,      # <-- CORREGIDO (antes 'end_timestamp_unix')
-        client_api_key=api_key 
+        start_unix=start_unix, 
+        end_unix=end_unix
+        # client_api_key=api_key <-- ELIMINADO
     )
 
     if not result["ok"]:
@@ -728,17 +729,22 @@ async def handle_batch_call(
     """
     bot_config = agent.config
 
+    # ==========================================================
+    # === ¡CORRECCIÓN! Ya no buscamos api_key aquí =============
+    # ==========================================================
+
     if not csv_file.filename.endswith('.csv'):
+        # CORRECCIÓN: También aceptar .xls y .xlsx (Paso futuro, por ahora solo .csv)
         raise HTTPException(status_code=400, detail="Se requiere un archivo .csv válido")
 
     # 1. Leer la configuración del bot (para IDs y API Key)
     agent_id = bot_config.get('elevenlabs_agent_id')
     # 'eleven_phone_number_id' lo guardaremos en el JSON desde WordPress
     phone_number_id = bot_config.get('eleven_phone_number_id')
-    api_key = bot_config.get('api_key') # <--- Necesario
+    # api_key = bot_config.get('api_key') # <-- ELIMINADO
 
-    if not agent_id or not phone_number_id or not api_key:
-        raise HTTPException(status_code=400, detail="Agente, número de teléfono o API key no configurado en el JSON")
+    if not agent_id or not phone_number_id: # <-- CORREGIDO
+        raise HTTPException(status_code=400, detail="Agente o número de teléfono no configurado en el JSON")
 
     # 2. Procesar el CSV y convertirlo a JSON para la API
     recipients = []
@@ -761,13 +767,16 @@ async def handle_batch_call(
         raise HTTPException(status_code=400, detail="El CSV no contiene destinatarios")
 
     # 3. Enviar la petición a ElevenLabs (¡Pasando la API Key del cliente!)
+    # ==========================================================
+    # === ¡CORRECCIÓN! Ya no pasamos client_api_key ===========
+    # ==========================================================
     print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
     result = start_batch_call(
         batch_name=batch_name,
         agent_id=agent_id,
         phone_number_id=phone_number_id,
-        recipients=recipients,
-        client_api_key=api_key # <--- Pasar la clave
+        recipients=recipients
+        # client_api_key=api_key # <-- ELIMINADO
     )
 
     if not result["ok"]:
