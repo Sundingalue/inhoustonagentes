@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware # <--- 1. AÑADIDO AQUÍ
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import JWTError, jwt
@@ -14,6 +15,7 @@ import glob
 from datetime import datetime, timedelta
 import time
 import io
+import csv # <--- AÑADIDO (faltaba para el batch call)
 
 # Importar las funciones del servicio que acabamos de añadir
 from services.elevenlabs_service import (
@@ -51,6 +53,19 @@ else:
 # App
 # =========================
 app = FastAPI()
+
+# =========================
+# Configuración de CORS
+# =========================
+# ¡ESTO RESUELVE EL ERROR 405 OPTIONS!
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Permitir todos los orígenes (puedes restringirlo a tu URL de WordPress)
+    allow_credentials=True,
+    allow_methods=["*"], # Permitir todos los métodos (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"], # Permitir todas las cabeceras
+)
+
 print("✅ FastAPI cargado correctamente y esperando eventos de ElevenLabs…")
 
 # =========================
@@ -639,9 +654,13 @@ async def get_agent_data(
     phone_number = bot_config.get('phone_number')
     # 'name' lo guardaremos en el JSON desde WordPress
     agent_name = bot_config.get('name', agent.bot_slug)
+    
+    # << CORRECCIÓN CLAVE: LEER LA API KEY DEL JSON >>
+    # El JSON debe tener la API Key de ElevenLabs específica de este cliente
+    api_key = bot_config.get('api_key')
 
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs")
+    if not agent_id or not api_key: # Verificamos ambos
+        raise HTTPException(status_code=400, detail="Agente no configurado para ElevenLabs (falta agent_id o api_key en el JSON)")
 
     # 2. Convertir fechas a Unix
     try:
@@ -652,8 +671,13 @@ async def get_agent_data(
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de fecha inválido, usar YYYY-MM-DD")
 
-    # 3. Consultar la API de consumo
-    result = get_agent_consumption_data(agent_id, start_unix, end_unix)
+    # 3. Consultar la API de consumo (¡Pasando la API Key del cliente!)
+    result = get_agent_consumption_data(
+        agent_id=agent_id,
+        start_timestamp_unix=start_unix,
+        end_timestamp_unix=end_unix,
+        client_api_key=api_key # <--- Pasar la clave
+    )
 
     if not result["ok"]:
         # Si no hay datos (ej. agente no encontrado en reporte), devolvemos ceros
@@ -702,13 +726,14 @@ async def handle_batch_call(
     if not csv_file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Se requiere un archivo .csv válido")
 
-    # 1. Leer la configuración del bot (para IDs)
+    # 1. Leer la configuración del bot (para IDs y API Key)
     agent_id = bot_config.get('elevenlabs_agent_id')
     # 'eleven_phone_number_id' lo guardaremos en el JSON desde WordPress
     phone_number_id = bot_config.get('eleven_phone_number_id')
+    api_key = bot_config.get('api_key') # <--- Necesario
 
-    if not agent_id or not phone_number_id:
-        raise HTTPException(status_code=400, detail="Agente o número de teléfono no configurado")
+    if not agent_id or not phone_number_id or not api_key:
+        raise HTTPException(status_code=400, detail="Agente, número de teléfono o API key no configurado en el JSON")
 
     # 2. Procesar el CSV y convertirlo a JSON para la API
     recipients = []
@@ -730,9 +755,15 @@ async def handle_batch_call(
     if not recipients:
         raise HTTPException(status_code=400, detail="El CSV no contiene destinatarios")
 
-    # 3. Enviar la petición a ElevenLabs
+    # 3. Enviar la petición a ElevenLabs (¡Pasando la API Key del cliente!)
     print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
-    result = start_batch_call(batch_name, agent_id, phone_number_id, recipients)
+    result = start_batch_call(
+        batch_name=batch_name,
+        agent_id=agent_id,
+        phone_number_id=phone_number_id,
+        recipients=recipients,
+        client_api_key=api_key # <--- Pasar la clave
+    )
 
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
