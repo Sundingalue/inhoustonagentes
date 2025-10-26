@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import time
 import io
 import csv
-import pandas as pd # Importar Pandas
+import pandas as pd 
 
 # Importar las funciones del servicio
 from services.elevenlabs_service import (
@@ -51,9 +51,9 @@ if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     except Exception as e: print(f"⚠️ Error Twilio: {e}")
 else: print("⚠️ Faltan variables Twilio.")
 
-# =========================
-# Lógica de Mapeo y Helpers
-# =========================
+# (Funciones de Mapeo, Webhook y Agendamiento omitidas por brevedad, asumiendo que están correctas)
+# (Incluir aquí el código completo de esas funciones)
+# ...
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
@@ -113,9 +113,6 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception: pass
     return {"agent_id": agent_id, "transcript_text": transcript_text, "caller": caller, "called": called, "timestamp": root.get("timestamp") or data.get("timestamp"), "raw": data}
 
-# =========================
-# Webhook y Endpoints Agendamiento
-# =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
     sig_header = None 
@@ -271,8 +268,10 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
         elif filename.endswith(('.xls', '.xlsx')): df = pd.read_excel(file_like_object)
         if df is None: raise ValueError("No se pudo leer archivo con pandas.")
         
+        # Paso 1: Limpiar los encabezados del Excel
         df.columns = [re.sub(r'\s+', '_', re.sub(r'[^\w\s]', '', col)).lower() for col in df.columns]
 
+        # Paso 2: Validación de columna telefónica
         if 'phone_number' not in df.columns:
             phone_col_candidates = ['telefono', 'teléfono', 'numero', 'número', 'phone']
             for col in df.columns:
@@ -294,13 +293,18 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
                 if key != 'phone_number':
-                    # --- LÓGICA FINAL: FORZAR A MINÚSCULAS PARA EL CÓDIGO PYTHON ---
+                    # --- LÓGICA DE NORMALIZACIÓN FINAL: MINÚSCULAS ---
+                    # Elimina guiones bajos y deja solo la palabra en minúsculas
                     clean_key = key.replace('_', '') 
                     
                     if clean_key == 'name':
-                        recipient_info['name'] = str(value) # Enviado como 'name'
+                        # FORZAR A LA CLAVE name (minúscula)
+                        recipient_info['name'] = str(value) 
                     elif clean_key == 'lastname':
-                        recipient_info['last_name'] = str(value) # Enviado como 'last_name'
+                        # FORZAR A LA CLAVE last_name (minúscula)
+                        # Nota: Si el excel original es 'last_name', Python lo verá como 'last_name'. 
+                        # Si es 'lastname', Python lo verá como 'lastname'. Debemos ajustarlo.
+                        recipient_info['last_name'] = str(value) 
                     elif key != 'phone_number':
                         recipient_info[clean_key] = str(value)
             
