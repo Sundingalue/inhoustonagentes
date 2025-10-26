@@ -111,14 +111,14 @@ def get_eleven_phone_numbers():
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
 # ===================================================================
-# === FUNCIÓN CON DEPURACIÓN (IMPRIME EL OBJETO) ====================
+# === FUNCIÓN CON DETECTOR DE BUCLE =================================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
     Obtiene los datos de consumo (llamadas, créditos, etc.) para UN agente 
     específico en un rango de fechas.
     
-    ¡CON DEPURACIÓN!
+    ¡CON DETECTOR DE BUCLE INFINITO!
     """
     print(f"[ElevenLabs] Obteniendo TODAS las conversaciones para Agente ID: {agent_id}...")
     
@@ -131,7 +131,8 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     
     # Control de paginación
     has_more = True
-    last_convo_id = None
+    last_convo_id_to_send = None # El cursor que ENVIAREMOS
+    last_convo_id_received = None # El cursor que RECIBIMOS
     
     page_num = 1 # Para logging
 
@@ -144,9 +145,9 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
             "page_size": 30 # (Lo ponemos explícito)
         }
         
-        if last_convo_id:
-            print(f"DEBUG: Pidiendo página CON 'after_conversation_id': {last_convo_id}")
-            params["after_conversation_id"] = last_convo_id
+        if last_convo_id_to_send:
+            print(f"DEBUG: Pidiendo página CON 'after_conversation_id': {last_convo_id_to_send}")
+            params["after_conversation_id"] = last_convo_id_to_send
         else:
             print("DEBUG: Pidiendo página SIN 'after_conversation_id' (es la primera)")
         
@@ -162,18 +163,16 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
         conversations_page = data.get("conversations", [])
         
         page_has_more = data.get("has_more", False)
-        page_last_convo_id = data.get("last_conversation_id", None)
+        
         print(f"DEBUG: Página {page_num} recibida.")
         print(f"DEBUG: Conversaciones en esta página: {len(conversations_page)}")
         print(f"DEBUG: API dice 'has_more': {page_has_more}")
-        print(f"DEBUG: API dice 'last_conversation_id': {page_last_convo_id}")
         
         
-        # +++++ LÍNEA DE DEPURACIÓN CRÍTICA +++++
+        # +++++ LÍNEA DE DEPURACIÓN CRÍTICA (AÚN LA NECESITAMOS) +++++
         if conversations_page and page_num == 1:
             try:
                 print("DEBUG: ================== INICIO DE LA PRIMERA CONVERSACIÓN ==================")
-                # Imprimimos la primera conversación en un formato legible
                 print(json.dumps(conversations_page[0], indent=2))
                 print("DEBUG: =================== FIN DE LA PRIMERA CONVERSACIÓN ====================")
             except Exception as e:
@@ -181,9 +180,13 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
         # +++++++++++++++++++++++++++++++++++++++
         
         
-        if not conversations_page and page_num == 1:
-            print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
-            return {"ok": True, "data": {"agent_id": agent_id, "calls": 0, "duration_secs": 0, "credits": 0}}
+        if not conversations_page:
+            if page_num == 1:
+                print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
+            else:
+                print(f"[ElevenLabs] Página {page_num} vacía. Asumiendo fin de resultados.")
+            break # Salir del bucle si no hay conversaciones (ya sea en la pág 1 o en una posterior)
+
         
         # Sumar los totales de esta página
         for convo in conversations_page:
@@ -194,31 +197,30 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
                 total_seconds += convo.get("duration_secs", 0)
 
         # --- Preparar el siguiente bucle ---
-        has_more = page_has_more 
-        last_convo_id = page_last_convo_id 
+        has_more = page_has_more # Actualizamos el 'has_more' del bucle
+        
+        # Obtener el ID de la última conversación de la lista actual
+        last_item = conversations_page[-1]
+        if isinstance(last_item, dict) and last_item.get("conversation_id"):
+            last_convo_id_received = last_item.get("conversation_id")
+        else:
+            print("DEBUG: No se pudo encontrar 'conversation_id' en el último item. Saliendo.")
+            break
+            
+        # ==========================================================
+        # === ¡AQUÍ ESTÁ EL DETECTOR DE BUCLE INFINITO! ===========
+        # ==========================================================
+        if last_convo_id_received == last_convo_id_to_send:
+            print(f"DEBUG: ¡BUCLE INFINITO DETECTADO! El ID del cursor recibido ({last_convo_id_received}) es igual al enviado. Saliendo.")
+            break
+        # ==========================================================
+            
+        last_convo_id_to_send = last_convo_id_received # Preparamos el cursor para la *siguiente* petición
         page_num += 1
         
         if not has_more:
             print("DEBUG: 'has_more' es False. Saliendo del bucle.")
             break
-            
-        if not last_convo_id:
-            # ====================================================================
-            # === ¡HIPÓTESIS! Vamos a arreglar la paginación AHORA ================
-            # ====================================================================
-            # Si la API no nos dio un 'last_conversation_id' global,
-            # lo tomaremos del último item de la lista.
-            if conversations_page:
-                last_item = conversations_page[-1] # Obtener el último dict de la lista
-                if isinstance(last_item, dict) and last_item.get("conversation_id"):
-                    last_convo_id = last_item.get("conversation_id")
-                    print(f"DEBUG: 'last_conversation_id' era None. Usando el ID del último item: {last_convo_id}")
-                else:
-                    print("DEBUG: 'last_conversation_id' es None y no se pudo sacar de la lista. Saliendo.")
-                    break # Salir si no podemos obtener el cursor
-            else:
-                print("DEBUG: 'last_conversation_id' es None y la lista está vacía. Saliendo.")
-                break
         
         print(f"[ElevenLabs] Página procesada. Total parcial: {total_calls} llamadas. Pidiendo siguiente página...")
 
