@@ -1,11 +1,10 @@
 # services/elevenlabs_service.py
 import os
 import time
-import json
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
-# Usa cualquiera de estas env vars
+# API key (acepta cualquiera de estos nombres)
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
 BASE_URL   = "https://api.elevenlabs.io"
 
@@ -24,50 +23,57 @@ def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if extra: headers.update(extra)
     return headers
 
-def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None, timeout: int = DEFAULT_TIMEOUT) -> Tuple[int, Any, Optional[str]]:
+def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
+          params: Optional[Dict[str, Any]] = None, timeout: int = DEFAULT_TIMEOUT) -> Tuple[int, Any, Optional[str], Dict[str, Any]]:
     try:
-        resp = requests.request(method=method, url=url, json=json_body, headers=_auth_headers(), timeout=timeout)
+        resp = requests.request(method=method, url=url, json=json_body, params=params,
+                                headers=_auth_headers(), timeout=timeout)
         ct = (resp.headers.get("Content-Type") or "").lower()
         data = resp.json() if "application/json" in ct else resp.text
-        return resp.status_code, data, None
+        return resp.status_code, data, None, {"url": resp.url, "ct": ct}
     except requests.RequestException as e:
-        return 0, None, str(e)
+        return 0, None, str(e), {"url": url, "ct": ""}
 
 def _retryable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 
-# =======================
-# Listados de Admin
-# =======================
+# ============= Listados de Admin =============
 def get_eleven_agents() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/agents"
-    status, data, err = _http("GET", url, None)
+    status, data, err, _ = _http("GET", url)
     if err: return {"ok": False, "error": f"HTTP error: {err}"}
     if 200 <= status < 300: return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
 def get_eleven_phone_numbers() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/twilio/phone-numbers"
-    status, data, err = _http("GET", url, None)
+    status, data, err, _ = _http("GET", url)
     if err: return {"ok": False, "error": f"HTTP error: {err}"}
     if 200 <= status < 300: return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
-# =======================
-# Métricas (restaurado)
-# =======================
+# ============= Métricas (multi-ruta, robusto) =============
 def _normalize_metrics(payload: Any) -> Optional[Dict[str, Any]]:
     """
-    Mapea las claves más comunes a un formato único:
-    { calls, credits, duration_secs }
+    Normaliza la respuesta a: { calls, credits, duration_secs }
+    Tolera claves alternativas y respuestas anidadas.
     """
     if not isinstance(payload, dict):
         return None
 
-    # Algunos endpoints devuelven todo dentro de "data"
-    d = payload.get("data", payload) if isinstance(payload.get("data"), (dict, list)) else payload
+    # A veces viene dentro de "data"
+    d = payload.get("data", payload)
+    if isinstance(d, list):
+        # Algunos endpoints devuelven lista de buckets -> agregamos
+        calls = 0; credits = 0.0; dur_s = 0.0
+        for row in d:
+            if not isinstance(row, dict): continue
+            calls   += int(row.get("calls") or row.get("total_calls") or 0)
+            credits += float(row.get("credits") or row.get("total_credits") or 0.0)
+            dur_s   += float(row.get("duration_secs") or row.get("total_duration_secs") or row.get("seconds") or 0.0)
+        return {"calls": calls, "credits": credits, "duration_secs": dur_s}
 
-    # Acepta estructuras planas y nombres alternativos
+    # Estructura plana
     calls   = (d.get("calls") or d.get("total_calls") or d.get("outbound_calls") or 0)
     credits = (d.get("credits") or d.get("total_credits") or d.get("credits_consumed") or 0.0)
     dur_s   = (d.get("duration_secs") or d.get("total_duration_secs") or d.get("seconds") or 0.0)
@@ -83,45 +89,43 @@ def _normalize_metrics(payload: Any) -> Optional[Dict[str, Any]]:
 
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Intenta múltiples rutas conocidas (compatibilidad). Si una responde,
-    normaliza y devuelve ok=True.
-    NO 'resetea' a cero por programación; si nada responde, devuelve ok=False.
+    Prueba múltiples rutas conocidas/compatibles. En cuanto una responda,
+    normaliza y devuelve ok=True. Si ninguna sirve, devolvemos ok=False
+    con trazas para ver en logs exactamente qué contestó ElevenLabs.
     """
-
-    # --- Ruta A (la más común/documentada): POST analytics de agente
-    url_a = f"{BASE_URL}/v1/convai/analytics/agent"
     payload = {"agent_id": agent_id, "start_unix_ts": start_unix_ts, "end_unix_ts": end_unix_ts}
-    status, data, err = _http("POST", url_a, payload)
-    if not err and 200 <= status < 300:
-        norm = _normalize_metrics(data)
-        if norm: return {"ok": True, "data": norm}
 
-    # --- Ruta B (algunas cuentas): GET summary de uso
-    try:
-        url_b = f"{BASE_URL}/v1/convai/usage/summary"
-        resp_b = requests.get(url_b, headers=_auth_headers(), params=payload, timeout=DEFAULT_TIMEOUT)
-        if 200 <= resp_b.status_code < 300:
-            norm = _normalize_metrics(resp_b.json())
-            if norm: return {"ok": True, "data": norm}
-    except requests.RequestException as e:
-        pass
+    candidates = [
+        # Rutas documentadas o comunes
+        ("POST", "/v1/convai/analytics/agent",    True,  None),   # JSON body
+        ("GET",  "/v1/convai/analytics/agent",    False, payload),# query params
+        ("GET",  "/v1/convai/usage/summary",      False, payload),
+        ("GET",  "/v1/convai/usage",              False, payload),
+        ("GET",  "/v1/usage",                     False, payload), # fallback muy genérico
+    ]
 
-    # --- Ruta C (fallback adicional GET analytics con params)
-    try:
-        url_c = f"{BASE_URL}/v1/convai/analytics/agent"
-        resp_c = requests.get(url_c, headers=_auth_headers(), params=payload, timeout=DEFAULT_TIMEOUT)
-        if 200 <= resp_c.status_code < 300:
-            norm = _normalize_metrics(resp_c.json())
-            if norm: return {"ok": True, "data": norm}
-    except requests.RequestException:
-        pass
+    for method, path, send_json, params in candidates:
+        url = f"{BASE_URL}{path}"
+        body = payload if send_json else None
+        status, data, err, meta = _http(method, url, json_body=body, params=params)
+        # Logs mínimos (aparecen en Render)
+        print(f"[metrics] try {method} {meta['url']} -> status={status} err={err}")
 
-    # Nada respondió correctamente
-    return {"ok": False, "error": f"No se pudo obtener métricas para {agent_id} en el rango {start_unix_ts}-{end_unix_ts}."}
+        if err:
+            continue
+        if 200 <= status < 300:
+            norm = _normalize_metrics(data)
+            if norm:
+                print(f"[metrics] OK via {path}: {norm}")
+                return {"ok": True, "data": norm}
+            else:
+                print(f"[metrics] WARNING normalize failed via {path}: {data}")
+        else:
+            print(f"[metrics] {path} -> {status}: {data}")
 
-# =======================
-# Outbound con variables
-# =======================
+    return {"ok": False, "error": f"No se pudo obtener métricas para {agent_id} en {start_unix_ts}-{end_unix_ts}."}
+
+# ============= Outbound con variables (lotes) =============
 def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
     dyn: Dict[str, Any] = {}
     for k, v in recipient.items():
@@ -132,7 +136,8 @@ def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
         dyn[k] = sv
     return dyn
 
-def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str, dynamic_variables: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
+def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str,
+                        dynamic_variables: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
     url = f"{BASE_URL}/v1/convai/twilio/outbound-call"
     payload = {
         "agent_id": agent_id,
@@ -146,7 +151,7 @@ def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str, dyn
 
     delay = 1.0
     for attempt in range(1, MAX_RETRIES + 1):
-        status, data, err = _http("POST", url, payload)
+        status, data, err, meta = _http("POST", url, json_body=payload)
         if err:
             if attempt >= MAX_RETRIES: return False, None, f"HTTP error: {err}", 0
             time.sleep(delay); delay *= RETRY_BACKOFF; continue
@@ -159,7 +164,8 @@ def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str, dyn
 
     return False, None, "Unknown error", 0
 
-def start_batch_call(call_name: str, agent_id: str, phone_number_id: str, recipients_json: List[Dict[str, Any]]) -> Dict[str, Any]:
+def start_batch_call(call_name: str, agent_id: str, phone_number_id: str,
+                     recipients_json: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(recipients_json, list):
         return {"ok": False, "error": "Parámetro recipients_json debe ser lista."}
     if not agent_id or not phone_number_id:
