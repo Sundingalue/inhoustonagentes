@@ -332,39 +332,57 @@ async def handle_batch_call(
     batch_name: str = Form(...),
     csv_file: UploadFile = File(...)
 ):
-    bot_cfg = agent.config
+    bot_config = agent.config
     filename = (csv_file.filename or "").lower()
-    if not filename.endswith((".csv", ".xls", ".xlsx")):
-        raise HTTPException(400, "Formato no soportado. Usa .csv, .xls o .xlsx")
 
-    # Claves correctas en tu config JSON:
-    agent_id        = bot_cfg.get("elevenlabs_agent_id")
-    phone_number_id = bot_cfg.get("elevenlabs_phone_number_id")  # <— CLAVE CORRECTA
+    # Extensiones válidas
+    allowed_extensions = (".csv", ".xls", ".xlsx")
+    if not filename.endswith(allowed_extensions):
+        raise HTTPException(400, f"Formato no soportado. Usa: {', '.join(allowed_extensions)}")
+
+    # --- Claves robustas (acepta varias variantes) ---
+    agent_id = (
+        bot_config.get("elevenlabs_agent_id")
+        or bot_config.get("agent_id")
+        or bot_config.get("eleven_agent_id")
+    )
+    phone_number_id = (
+        bot_config.get("elevenlabs_phone_number_id")  # <-- ESTE es el que guarda WordPress
+        or bot_config.get("eleven_phone_number_id")
+        or bot_config.get("phone_number_id")
+    )
+
     if not agent_id or not phone_number_id:
         raise HTTPException(400, "Faltan elevenlabs_agent_id o elevenlabs_phone_number_id en la config")
 
-    recipients: List[Dict[str, Any]] = []
+    # --- Parse del archivo con pandas (igual que ya tenías) ---
+    import io, re
+    import pandas as pd
+
+    recipients = []
     try:
         content = await csv_file.read()
-        buf = io.BytesIO(content)
+        file_like_object = io.BytesIO(content)
 
-        # Lee CSV/Excel
         if filename.endswith(".csv"):
-            df = pd.read_csv(buf)
+            df = pd.read_csv(file_like_object)
         else:
-            df = pd.read_excel(buf)
+            df = pd.read_excel(file_like_object)
 
-        # Limpia encabezados: espacios/puntuación -> guiones bajos, minúsculas
-        df.columns = [re.sub(r"\s+", "_", re.sub(r"[^\w\s]", "", str(c))).lower() for c in df.columns]
+        # Normalizar headers
+        df.columns = [
+            re.sub(r"\s+", "_", re.sub(r"[^\w\s]", "", str(col))).lower()
+            for col in df.columns
+        ]
 
-        # Detecta columna telefónica
+        # Encontrar / renombrar la columna de teléfono
         if "phone_number" not in df.columns:
             for cand in ["telefono", "teléfono", "numero", "número", "phone"]:
                 if cand in df.columns:
                     df.rename(columns={cand: "phone_number"}, inplace=True)
                     break
         if "phone_number" not in df.columns:
-            raise HTTPException(400, "El archivo debe tener columna 'phone_number' (o equivalente)")
+            raise HTTPException(400, "El archivo debe contener una columna 'phone_number' (o similar)")
 
         df = df.astype(str).fillna("")
         rows = df.to_dict(orient="records")
@@ -374,41 +392,46 @@ async def handle_batch_call(
             if not phone:
                 continue
 
-            # Flatten + normaliza claves para Eleven: name / last_name
-            info = {"phone_number": phone}
+            item = {"phone_number": phone}
+
+            # Mantén name / last_name en minúscula (como en tu Agente)
             for k, v in row.items():
                 if k == "phone_number":
                     continue
-                val = str(v).strip()
-                if not val:
-                    continue
-                clean_key = k.replace("_", "").lower()
-                if clean_key == "name":
-                    info["name"] = val
-                elif clean_key == "lastname":
-                    info["last_name"] = val
+                key_clean = k.replace("_", "").lower()
+                if key_clean == "name":
+                    item["name"] = str(v).strip()
+                elif key_clean in ("lastname", "apellidos", "apellido"):
+                    item["last_name"] = str(v).strip()
                 else:
-                    # otras variables personalizadas (en minúsculas sin underscores)
-                    info[clean_key] = val
-            recipients.append(info)
+                    # cualquier otra variable dinámica
+                    item[key_clean] = str(v).strip()
+
+            recipients.append(item)
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"💥 Error leyendo archivo: {e}")
+        import traceback
         traceback.print_exc()
         raise HTTPException(400, f"Error al procesar el archivo: {e}")
 
     if not recipients:
-        raise HTTPException(400, "Archivo sin destinatarios válidos")
+        raise HTTPException(400, "El archivo no contiene destinatarios válidos")
 
-    print(f"DEBUG batch '{batch_name}': sample={recipients[0] if recipients else None} total={len(recipients)}")
+    print(f"DEBUG outbound sample -> {recipients[0] if recipients else None}")
+
+    # --- Llamada al servicio que ya tienes ---
+    from services.elevenlabs_service import start_batch_call
+
     result = start_batch_call(
         call_name=batch_name,
         agent_id=agent_id,
         phone_number_id=phone_number_id,
-        recipients_json=recipients
+        recipients_json=recipients,
     )
-    if not result["ok"]:
-        raise HTTPException(500, result["error"])
+    if not result.get("ok"):
+        raise HTTPException(500, result.get("error", "Error desconocido"))
+
     return JSONResponse({"ok": True, "data": result["data"]})
+
