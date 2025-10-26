@@ -1,27 +1,20 @@
 # services/elevenlabs_service.py
 import os
 import time
-import json
-import math
-import traceback
-import re
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
-# =========================
-# Configuración base
-# =========================
+# === Config básica (como antes) ===
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
 BASE_URL   = "https://api.elevenlabs.io"
-
-DEFAULT_TIMEOUT = 30  # segundos
+DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
-RETRY_BACKOFF   = 1.5  # multiplicador
+RETRY_BACKOFF   = 1.5
 
-
+# ---------- Helpers HTTP ----------
 def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if not XI_API_KEY:
-        raise RuntimeError("XI_API_KEY no configurada en entorno.")
+        raise RuntimeError("XI_API_KEY / ELEVENLABS_API_KEY no está configurada.")
     headers = {
         "xi-api-key": XI_API_KEY,
         "Accept": "application/json",
@@ -31,41 +24,22 @@ def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers.update(extra)
     return headers
 
-
-def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None, timeout: int = DEFAULT_TIMEOUT) -> Tuple[int, Any, Optional[str]]:
-    """
-    Envuelve requests.* con manejo de excepciones.
-    Retorna: (status_code, json|texto, error_message|None)
-    """
+def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
+          timeout: int = DEFAULT_TIMEOUT) -> Tuple[int, Any, Optional[str]]:
     try:
-        resp = requests.request(method=method, url=url, json=json_body, headers=_auth_headers(), timeout=timeout)
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" in content_type:
-            try:
-                data = resp.json()
-            except Exception:
-                data = resp.text
-        else:
-            data = resp.text
+        resp = requests.request(method=method, url=url, json=json_body,
+                                headers=_auth_headers(), timeout=timeout)
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        data = resp.json() if "application/json" in ct else resp.text
         return resp.status_code, data, None
     except requests.RequestException as e:
         return 0, None, str(e)
 
-
 def _retryable(status: int) -> bool:
-    # Reintentar en 429 y 5xx
     return status == 429 or 500 <= status < 600
 
-
-# =========================
-# Agentes y Números
-# =========================
+# ---------- Admin: Agentes / Números (SIN CAMBIOS) ----------
 def get_eleven_agents() -> Dict[str, Any]:
-    """
-    Devuelve { ok: bool, data: Any, error?: str }
-    Normalmente ElevenLabs expone un listado de agentes ConvAI.
-    Endpoint utilizado (puede variar en docs): GET /v1/convai/agents
-    """
     url = f"{BASE_URL}/v1/convai/agents"
     status, data, err = _http("GET", url, None)
     if err:
@@ -74,13 +48,7 @@ def get_eleven_agents() -> Dict[str, Any]:
         return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
-
 def get_eleven_phone_numbers() -> Dict[str, Any]:
-    """
-    Devuelve { ok: bool, data: Any, error?: str }
-    Endpoint usual para números Twilio de ConvAI:
-    GET /v1/convai/twilio/phone-numbers
-    """
     url = f"{BASE_URL}/v1/convai/twilio/phone-numbers"
     status, data, err = _http("GET", url, None)
     if err:
@@ -89,81 +57,80 @@ def get_eleven_phone_numbers() -> Dict[str, Any]:
         return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
+# ---------- MÉTRICAS (RESTABLECIDO A LA RUTA ORIGINAL) ----------
+def _normalize_metrics(payload: Any) -> Dict[str, Any]:
+    """
+    Normaliza a {calls, credits, duration_secs} tolerando nombres típicos.
+    """
+    if not isinstance(payload, dict):
+        return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
+    d = payload.get("data", payload)
+    # nombres frecuentes
+    calls   = d.get("calls", d.get("total_calls", 0))
+    credits = d.get("credits", d.get("total_credits", d.get("credits_consumed", 0.0)))
+    dur_s   = d.get("duration_secs", d.get("total_duration_secs", d.get("seconds", 0.0)))
+    try:
+        return {
+            "calls": int(calls or 0),
+            "credits": float(credits or 0.0),
+            "duration_secs": float(dur_s or 0.0),
+        }
+    except Exception:
+        return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
 
-# =========================
-# Consumo / Métricas
-# =========================
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Devuelve { ok: bool, data: { calls, credits, duration_secs }, error?: str }
-
-    Nota: La API de métricas puede cambiar de ruta/nombre según la versión pública.
-    Aquí intentamos un endpoint típico; si falla, devolvemos ceros de forma segura
-    para no romper el panel.
+    Versión simple (como estaba): POST /v1/convai/analytics/agent
+    SIN cambios de environment ni rutas alternativas.
     """
-    # Intento 1: endpoint plausible (ajústalo a tu doc real si ya lo tienes)
     url = f"{BASE_URL}/v1/convai/analytics/agent"
-    payload = {
-        "agent_id": agent_id,
-        "start_unix_ts": start_unix_ts,
-        "end_unix_ts": end_unix_ts,
-    }
-    status, data, err = _http("POST", url, payload)
-    if err:
-        # Fallback con ceros
-        return {"ok": True, "data": {"calls": 0, "credits": 0.0, "duration_secs": 0.0}}
+    payload = {"agent_id": agent_id, "start_unix_ts": start_unix_ts, "end_unix_ts": end_unix_ts}
 
-    if 200 <= status < 300 and isinstance(data, dict):
-        # Intentamos leer campos comunes; normalizamos a lo que espera el panel
-        calls = data.get("calls") or data.get("total_calls") or 0
-        credits = data.get("credits") or data.get("total_credits") or 0.0
-        duration_secs = data.get("duration_secs") or data.get("total_duration_secs") or 0.0
-        try:
-            calls = int(calls)
-        except Exception:
-            calls = 0
-        try:
-            credits = float(credits)
-        except Exception:
-            credits = 0.0
-        try:
-            duration_secs = float(duration_secs)
-        except Exception:
-            duration_secs = 0.0
-        return {"ok": True, "data": {"calls": calls, "credits": credits, "duration_secs": duration_secs}}
+    delay = 1.0
+    for attempt in range(1, MAX_RETRIES + 1):
+        status, data, err = _http("POST", url, payload)
+        if err:
+            if attempt >= MAX_RETRIES:
+                return {"ok": False, "error": f"HTTP error: {err}"}
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
 
-    # Si no funcionó, devolvemos ceros en lugar de romper el flujo
-    return {"ok": True, "data": {"calls": 0, "credits": 0.0, "duration_secs": 0.0}}
+        if 200 <= status < 300 and isinstance(data, (dict, list)):
+            # Algunos tenants devuelven lista (buckets) -> agregamos
+            if isinstance(data, list):
+                calls = 0; credits = 0.0; dur_s = 0.0
+                for row in data:
+                    if not isinstance(row, dict): continue
+                    calls   += int(row.get("calls") or row.get("total_calls") or 0)
+                    credits += float(row.get("credits") or row.get("total_credits") or 0.0)
+                    dur_s   += float(row.get("duration_secs") or row.get("total_duration_secs") or row.get("seconds") or 0.0)
+                return {"ok": True, "data": {"calls": calls, "credits": credits, "duration_secs": dur_s}}
+            # Estructura plana
+            norm = _normalize_metrics(data)
+            return {"ok": True, "data": norm}
 
+        if _retryable(status):
+            if attempt >= MAX_RETRIES:
+                return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}"}
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
 
-# =========================
-# Batch Outbound Call
-# =========================
+        # 4xx (no reintenta)
+        return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}"}
+
+    return {"ok": False, "error": "Unknown error"}
+
+# ---------- OUTBOUND (LOTE) — SE MANTIENE ----------
 def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Construye dynamic_variables a partir de la fila:
-    - Siempre ignora 'phone_number'.
-    - Incluye 'name' y 'last_name' si existen.
-    - Incluye cualquier otra columna adicional (ya normalizada a snake_case por el backend).
-    """
     dyn: Dict[str, Any] = {}
     for k, v in recipient.items():
-        if k == "phone_number":
-            continue
-        if v is None:
-            continue
-        val = str(v).strip()
-        if val == "":
-            continue
-        dyn[k] = val
+        if k == "phone_number": continue
+        if v is None: continue
+        sv = str(v).strip()
+        if not sv: continue
+        dyn[k] = sv
     return dyn
 
-
-def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str, dynamic_variables: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
-    """
-    Hace el POST /v1/convai/twilio/outbound-call con reintentos.
-    Retorna: (ok, json_data, error_str, status_code)
-    """
+def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str,
+                        dynamic_variables: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
     url = f"{BASE_URL}/v1/convai/twilio/outbound-call"
     payload = {
         "agent_id": agent_id,
@@ -179,110 +146,61 @@ def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str, dyn
     for attempt in range(1, MAX_RETRIES + 1):
         status, data, err = _http("POST", url, payload)
         if err:
-            # Error de red a nivel requests
-            if attempt >= MAX_RETRIES:
-                return False, None, f"HTTP error: {err}", 0
-            time.sleep(delay)
-            delay *= RETRY_BACKOFF
-            continue
-
+            if attempt >= MAX_RETRIES: return False, None, f"HTTP error: {err}", 0
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
         if 200 <= status < 300:
-            # Ok
-            out = data if isinstance(data, dict) else {"raw": data}
-            return True, out, None, status
-
+            return True, (data if isinstance(data, dict) else {"raw": data}), None, status
         if _retryable(status):
-            if attempt >= MAX_RETRIES:
-                return False, data, f"ElevenLabs error {status}: {data}", status
-            # Backoff
-            time.sleep(delay)
-            delay *= RETRY_BACKOFF
-            continue
-
-        # No retryable
+            if attempt >= MAX_RETRIES: return False, data, f"ElevenLabs error {status}: {data}", status
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
         return False, data, f"ElevenLabs error {status}: {data}", status
 
-    return False, None, "Unknown error (no retries left)", 0
+    return False, None, "Unknown error", 0
 
-
-def start_batch_call(call_name: str, agent_id: str, phone_number_id: str, recipients_json: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Lanza llamadas salientes una por una.
-    recipients_json: lista de objetos con al menos 'phone_number' y opcionalmente 'name', 'last_name' y demás columnas.
-
-    Devuelve:
-    {
-      "ok": True/False,
-      "data": {
-         "batch_name": str,
-         "total": int,
-         "sent": int,
-         "failed": int,
-         "failures": [ { "phone_number": str, "error": str, "status": int, "payload_sample": {...} } ],
-         "responses_sample": [ ... hasta 3 ... ]
-      },
-      "error": str (opcional)
-    }
-    """
+def start_batch_call(call_name: str, agent_id: str, phone_number_id: str,
+                     recipients_json: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(recipients_json, list):
-        return {"ok": False, "error": "Parámetro recipients_json debe ser una lista."}
+        return {"ok": False, "error": "Parámetro recipients_json debe ser lista."}
     if not agent_id or not phone_number_id:
         return {"ok": False, "error": "Faltan agent_id o phone_number_id."}
 
-    total = len(recipients_json)
-    sent = 0
-    failed = 0
-    failures: List[Dict[str, Any]] = []
-    responses_sample: List[Any] = []
-
-    # Throttling simple para no golpear demasiado la API (ajusta a tu gusto)
+    total = len(recipients_json); sent = 0; failed = 0
+    failures: List[Dict[str, Any]] = []; responses_sample: List[Any] = []
     per_call_sleep = float(os.getenv("ELEVENLABS_BATCH_SLEEP", "0.0"))
-    sample_limit = 3
 
-    for idx, recipient in enumerate(recipients_json, start=1):
-        to_number = str(recipient.get("phone_number", "")).strip()
-        if not to_number:
+    for idx, r in enumerate(recipients_json, start=1):
+        to = str(r.get("phone_number","")).strip()
+        if not to:
             failed += 1
-            failures.append({
-                "phone_number": "",
-                "error": "Fila sin phone_number",
-                "status": 0,
-                "payload_sample": recipient
-            })
+            failures.append({"phone_number":"","error":"Fila sin phone_number","status":0,"payload_sample":r})
             continue
 
-        dynamic_variables = _build_dynamic_variables(recipient)
-
-        ok, data, err, status = _post_outbound_call(agent_id, phone_number_id, to_number, dynamic_variables)
+        dyn = _build_dynamic_variables(r)  # <-- mantiene name, last_name, etc.
+        ok, data, err, status = _post_outbound_call(agent_id, phone_number_id, to, dyn)
         if ok:
             sent += 1
-            if len(responses_sample) < sample_limit:
-                responses_sample.append({
-                    "phone_number": to_number,
-                    "result": data
-                })
+            if len(responses_sample) < 3:
+                responses_sample.append({"phone_number": to, "result": data})
         else:
             failed += 1
             failures.append({
-                "phone_number": to_number,
+                "phone_number": to,
                 "error": err or "error_desconocido",
                 "status": status,
-                "payload_sample": {"dynamic_variables": dynamic_variables}
+                "payload_sample": {"dynamic_variables": dyn}
             })
 
-        if per_call_sleep > 0 and idx < total:
+        if per_call_sleep and idx < total:
             time.sleep(per_call_sleep)
 
-    summary = {
-        "batch_name": call_name,
-        "total": total,
-        "sent": sent,
-        "failed": failed,
-        "failures": failures,
-        "responses_sample": responses_sample
+    return {
+        "ok": True,
+        "data": {
+            "batch_name": call_name,
+            "total": total,
+            "sent": sent,
+            "failed": failed,
+            "failures": failures,
+            "responses_sample": responses_sample
+        }
     }
-
-    if failed == 0:
-        return {"ok": True, "data": summary}
-    # Si hubo fallos, igual devolvemos ok=True para que el backend pueda mostrar el detalle
-    return {"ok": True, "data": summary}
