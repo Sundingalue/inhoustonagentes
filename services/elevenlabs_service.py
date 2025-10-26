@@ -6,6 +6,7 @@ import time
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVEN_API_BASE = "https://api.elevenlabs.io/v1"
 
+# --- Tasa Fallback de Créditos por Segundo ---
 DEFAULT_CREDITS_PER_SEC_FALLBACK = 10.73
 try:
     FALLBACK_CREDITS_PER_SEC = float(os.getenv("ELEVENLABS_CREDITS_PER_SEC_FALLBACK", DEFAULT_CREDITS_PER_SEC_FALLBACK))
@@ -15,6 +16,7 @@ print(f"[ElevenLabs] Usando tasa fallback de créditos/seg: {FALLBACK_CREDITS_PE
 
 # --- Funciones existentes (sin cambios) ---
 def start_conversation_with_agent(agent_id, input_text=None):
+    # ... (código sin cambios) ...
     url = f"https://api.elevenlabs.io/v1/agents/{agent_id}/conversation"
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {"message": input_text} if input_text else {}
@@ -27,7 +29,7 @@ def start_conversation_with_agent(agent_id, input_text=None):
         return {"error": f"Error al iniciar conversación"}
 
 def _eleven_request(method, endpoint, payload=None, params=None):
-    # ... (código del helper _eleven_request sin cambios) ...
+    # ... (código sin cambios) ...
     if not ELEVENLABS_API_KEY:
         print("[ElevenLabs] Error: API Key no configurada.")
         return {"ok": False, "error": "API Key no configurada"}
@@ -55,34 +57,32 @@ def _eleven_request(method, endpoint, payload=None, params=None):
         print(f"[ElevenLabs] Error Conexión: {req_err}")
         return {"ok": False, "error": f"Error conexión: {req_err}"}
 
-
 def get_eleven_agents():
+    # ... (código sin cambios) ...
     print("[ElevenLabs] Obteniendo agentes...")
     return _eleven_request("GET", "/convai/agents")
 
 def get_eleven_phone_numbers():
+    # ... (código sin cambios) ...
     print("[ElevenLabs] Obteniendo números...")
     return _eleven_request("GET", "/convai/phone-numbers")
 
 # ===================================================================
-# === FUNCIÓN CON PARÁMETROS PHP Y LOG DE TIMESTAMPS ==============
+# === FUNCIÓN FINAL (Usa solo Fallback para Créditos) ===============
 # ===================================================================
-def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts): # Cambiamos nombres aquí para claridad
+def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     """
     Obtiene consumo usando /conversations con paginación (cursor),
-    parámetros de fecha estilo PHP y fallback de créditos.
+    parámetros de fecha correctos y fallback de créditos por duración.
     """
     print(f"[ElevenLabs] Obteniendo TODAS las conversaciones para Agente ID: {agent_id}...")
-    # +++ Loggear los timestamps recibidos +++
     print(f"DEBUG: Timestamps Unix calculados: start={start_unix_ts}, end={end_unix_ts}")
-    # ++++++++++++++++++++++++++++++++++++++++
     
     endpoint = "/convai/conversations"
     
     total_calls = 0
     total_credits = 0.0
     total_seconds = 0.0
-    credit_field_candidates = ['credits_used', 'credit_cost', 'credits', 'llm_credits', 'cost_credits', 'total_credits', 'credit_usage']
     
     has_more = True
     next_cursor = None
@@ -90,23 +90,19 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts): # Cambiamo
     max_pages = 50 
 
     while has_more and page_num <= max_pages:
-        print(f"[ElevenLabs] Solicitando página {page_num}...")
+        # print(f"[ElevenLabs] Solicitando página {page_num}...") # Opcional: quitar verbose logs
         params = {
             "agent_id": agent_id,
             "page_size": 30 
         }
         
-        # Enviar fechas solo si NO hay cursor (primera página)
-        # *** Usando los nombres del PHP ***
         if not next_cursor:
-            params["call_start_after_unix"] = int(start_unix_ts)  # <--- REVERTIDO A PHP
-            params["call_start_before_unix"] = int(end_unix_ts) # <--- MANTENER (Funciona)
-            print("DEBUG: Enviando fechas (primera página)")
+            params["call_start_after_unix"] = int(start_unix_ts)
+            params["call_start_before_unix"] = int(end_unix_ts) 
         else:
             params["cursor"] = next_cursor 
-            print(f"DEBUG: Enviando cursor: {next_cursor} (NO se envían fechas)")
         
-        print(f"DEBUG: Params enviados a la API: {params}") 
+        # print(f"DEBUG: Params enviados a la API: {params}") # Opcional: quitar verbose logs
         result = _eleven_request("GET", endpoint, params=params)
         
         if not result["ok"]:
@@ -117,61 +113,56 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts): # Cambiamo
         conversations_page = data.get("conversations", [])
         
         if not conversations_page:
-            if page_num == 1: print(f"[ElevenLabs] No se encontraron conversaciones...")
+            if page_num == 1: print(f"[ElevenLabs] No se encontraron conversaciones.")
             else: print(f"[ElevenLabs] Página {page_num} vacía. Fin.")
             break 
 
-        # Imprimir JSON (solo la primera vez)
-        if page_num == 1 and conversations_page:
-             try:
-                 print("DEBUG: ================== PRIMERA CONVERSACIÓN (PAG 1) ==================")
-                 print(json.dumps(conversations_page[0], indent=2))
-                 print("DEBUG: =================================================================")
-             except Exception as e:
-                 print(f"DEBUG: Error al imprimir el objeto de conversación: {e}")
-
-        # Sumar totales
+        # Sumar totales usando solo fallback
         for convo in conversations_page:
             if isinstance(convo, dict):
                 call_status = convo.get('call_successful', 'success') 
                 if call_status != 'success': continue
+
                 total_calls += 1
+                
                 secs = float(convo.get("call_duration_secs", convo.get("duration_secs", 0.0)))
                 total_seconds += secs
-                credits_found = 0.0
-                found_explicit_credits = False
-                for field_name in credit_field_candidates:
-                    if field_name in convo and convo[field_name] is not None:
-                        try: value = float(convo[field_name])
-                        except (ValueError, TypeError): continue 
-                        if value >= 0: 
-                            credits_found = value
-                            found_explicit_credits = True 
-                            break 
-                if not found_explicit_credits and secs > 0:
+
+                # *** SIEMPRE USAR FALLBACK ***
+                if secs > 0:
                     calculated_credits = secs * FALLBACK_CREDITS_PER_SEC
                     total_credits += calculated_credits
-                else:
-                    total_credits += credits_found 
+                    # Opcional: Loggear cálculo fallback si quieres verificar
+                    # print(f"DEBUG: Calculando fallback: {secs:.2f}s * {FALLBACK_CREDITS_PER_SEC:.2f} = {calculated_credits:.4f}")
 
         has_more = data.get("has_more", False)
         next_cursor = data.get("next_cursor", None) 
         
-        print(f"[ElevenLabs] Página {page_num} procesada. Total parcial: {total_calls} llamadas, {total_credits:.4f} créditos. HasMore={has_more}, NextCursor={next_cursor}")
+        # print(f"[ElevenLabs] Página {page_num} procesada...") # Opcional: quitar verbose logs
         
         if not has_more or not next_cursor:
-            print("[ElevenLabs] Fin de la paginación según la API.")
+            # print("[ElevenLabs] Fin de la paginación según la API.") # Opcional: quitar verbose logs
             break 
             
         page_num += 1
 
     if page_num > max_pages: print(f"[ElevenLabs] ADVERTENCIA: Límite de {max_pages} páginas alcanzado.")
     print(f"[ElevenLabs] Consumo total final calculado: {total_calls} llamadas, {total_credits:.4f} créditos.")
-    normalized_data = {"agent_id": agent_id, "calls": total_calls, "duration_secs": total_seconds, "credits": total_credits}
+    
+    normalized_data = {
+        "agent_id": agent_id,
+        "calls": total_calls,
+        "duration_secs": total_seconds,
+        "credits": total_credits # Devolver el total de créditos calculado por fallback
+    }
     return {"ok": True, "data": normalized_data}
+# ===================================================================
+# === FIN DE LA FUNCIÓN FINAL =======================================
+# ===================================================================
 
 # --- Función start_batch_call (sin cambios) ---
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
+    # ... (código sin cambios) ...
     print(f"[ElevenLabs] Iniciando lote: {call_name} (Agente: {agent_id})")
     endpoint = "/convai/batch-calling/submit"
     payload = {"call_name": call_name, "agent_id": agent_id, "agent_phone_number_id": phone_number_id, "recipients": recipients_json}
