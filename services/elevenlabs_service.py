@@ -105,55 +105,71 @@ def get_eleven_phone_numbers():
 
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
+# ===================================================================
+# === FUNCIÓN CORREGIDA =============================================
+# ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
     Obtiene los datos de consumo (llamadas, créditos, etc.) para UN agente 
     específico en un rango de fechas.
-    (API: GET /v1/convai/analytics)
-    """
-    print(f"[ElevenLabs] Obteniendo consumo para Agente ID: {agent_id}")
     
-    endpoint = "/convai/analytics"
+    ¡CORREGIDO! Usa el endpoint /conversations y suma los totales.
+    (API: GET /v1/convai/conversations)
+    """
+    print(f"[ElevenLabs] Obteniendo conversaciones para Agente ID: {agent_id}...")
+    
+    endpoint = "/convai/conversations"
     params = {
+        "agent_id": agent_id,
         "start_unix": int(start_unix),
         "end_unix": int(end_unix)
+        # Nota: La API parece tener un límite por defecto, 
+        # pero asumiremos que no hay más de 1000 llamadas en el rango
     }
+    
     result = _eleven_request("GET", endpoint, params=params)
     
     if not result["ok"]:
-        return result # Devuelve el error
+        return result # Devuelve el error (ej. 401, 500)
 
-    # La API devuelve datos de *todos* los agentes. 
-    # Debemos filtrar solo el que nos interesa.
-    all_agents_data = []
-    if "by_agent" in result["data"]:
-        all_agents_data = result["data"].get("by_agent", [])
-    elif "agents" in result["data"]:
-         all_agents_data = result["data"].get("agents", [])
+    # La API devuelve un objeto con una clave "conversations" que es una lista
+    conversations = result.get("data", {}).get("conversations", [])
+    
+    if not conversations:
+        print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
+        # No es un error, solo no hay datos. Devolvemos 0.
+        return {"ok": True, "data": {
+            "agent_id": agent_id,
+            "calls": 0,
+            "duration_secs": 0,
+            "credits": 0
+        }}
 
-    for agent_data in all_agents_data:
-        if agent_data.get("agent_id") == agent_id:
-            # ¡Encontrado! Devuelve solo los datos de este agente
-            print(f"[ElevenLabs] Consumo encontrado para {agent_id}")
-            
-            # Normalizamos los datos que devuelve la API
-            d = agent_data
-            secs = d.get("seconds", d.get("duration_secs", 0))
-            creds = d.get("credits", d.get("credits_used", d.get("credit_cost", 0)))
-            calls = d.get("calls", d.get("call_count", 0))
-            
-            normalized_data = {
-                "agent_id": agent_id,
-                "name": d.get("agent_name", d.get("name", "N/A")),
-                "calls": calls,
-                "duration_secs": secs,
-                "credits": creds
-            }
-            return {"ok": True, "data": normalized_data}
-            
-    # Si el bucle termina, no se encontró el agente en el reporte
-    print(f"[ElevenLabs] Agente {agent_id} no encontrado en el reporte de consumo.")
-    return {"ok": False, "error": "Agente no encontrado en el reporte de consumo para ese rango."}
+    # Ahora, sumamos el consumo de todas las conversaciones encontradas
+    total_calls = 0
+    total_credits = 0
+    total_seconds = 0
+    
+    for convo in conversations:
+        if isinstance(convo, dict):
+            total_calls += 1
+            # Sumamos los campos de consumo. Usamos .get(campo, 0) por seguridad.
+            total_credits += convo.get("credit_usage", 0) 
+            total_seconds += convo.get("duration_secs", 0)
+
+    print(f"[ElevenLabs] Consumo total calculado: {total_calls} llamadas, {total_credits} créditos.")
+    
+    # Devolvemos el mismo formato que la función original esperaba
+    normalized_data = {
+        "agent_id": agent_id,
+        "calls": total_calls,
+        "duration_secs": total_seconds,
+        "credits": total_credits
+    }
+    return {"ok": True, "data": normalized_data}
+# ===================================================================
+# === FIN DE LA FUNCIÓN CORREGIDA ===================================
+# ===================================================================
 
 
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
