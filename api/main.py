@@ -152,74 +152,50 @@ def envcheck():
 
 from services.calendar_checker import check_availability
 from services.calendar_service import book_appointment
-class CitaPayload(dict):
-    def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); required = ["cliente_nombre", "fecha", "hora", "telefono"];
-    if not all(k in self for k in required): raise ValueError(f"Faltan keys: {required}")
 
 # ==========================================================
-# === FUNCIÓN agendar_cita_endpoint CORREGIDA (Indentación) ===
+# === CLASE CitaPayload CORREGIDA (Indentación) ============
 # ==========================================================
+class CitaPayload(dict):
+    """
+    Clase simple para validar la estructura del JSON de entrada.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        required = ["cliente_nombre", "fecha", "hora", "telefono"]
+        # --- La validación AHORA está DENTRO de __init__ ---
+        if not all(k in self for k in required):
+             raise ValueError(f"Faltan keys: {required}")
+# ==========================================================
+# === FIN CLASE CORREGIDA ==================================
+# ==========================================================
+
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
     """
     Endpoint que coordina la verificación de disponibilidad y la creación del evento.
-    Simula la llamada final que haría la lógica de 'workflows/processor.py'.
     """
-    # --- TRY PRINCIPAL ---
     try:
-        # 1. Cargar y validar el JSON de la solicitud (Payload)
         try: payload = CitaPayload(await request.json())
         except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
         except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
-
-        cliente_nombre = payload['cliente_nombre']; fecha_str = payload['fecha']; hora_str = payload['hora']
-
-        # 2. Verificar Disponibilidad
-        print(f"🔄 Verificando disponibilidad {cliente_nombre} {fecha_str} {hs}...") # Corrección menor: hs -> hora_str
-        if not check_availability(fecha_str, hora_str):
-            return JSONResponse(status_code=409, content={"status":"failure", "message":f"No disponible: {fecha_str} {hora_str}."})
-
-        # 3. Agendar Cita
-        print("✅ Disponible. Agendando...");
-        book_result = book_appointment(nombre=cliente_nombre, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fecha_str, horaCita=hora_str)
-
-        # 4. Analizar Respuesta y Enviar SMS
+        cn=payload['cliente_nombre']; fs=payload['fecha']; hs=payload['hora']
+        print(f"🔄 Verificando disponibilidad {cn} {fs} {hs}...")
+        if not check_availability(fs, hs): return JSONResponse(status_code=409, content={"status":"failure","message":f"No disponible: {fs} {hs}."})
+        print("✅ Disponible. Agendando..."); book_result = book_appointment(nombre=cn, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fs, horaCita=hs)
         if book_result.get('status') == 'success':
-            success_message = f"Cita agendada para {cliente_nombre}. {book_result.get('message','Éxito.')}"
-            print(f"🎉 {success_message}")
-
-            # --- INICIO: Enviar SMS de Confirmación con Twilio ---
+            msg = f"Cita agendada {cn}. {book_result.get('message','Éxito.')}" ; print(f"🎉 {msg}")
             if twilio_configurado:
                 try: # TRY para SMS
-                    cliente_telefono = payload.get('telefono')
-                    if cliente_telefono:
-                        mensaje_sms = f"In Houston Texas: Hola {cliente_nombre}. Confirmamos su cita para el {fecha_str} a las {hora_str}."
-                        print(f"🔄 Enviando SMS a {cliente_telefono}...")
-                        message = twilio_client.messages.create(body=mensaje_sms, from_=TWILIO_PHONE_NUMBER, to=cliente_telefono)
-                        print(f"✅ SMS enviado. SID: {message.sid}")
-                    else:
-                        print("⚠️ No se encontró 'telefono' en payload, no se puede enviar SMS.")
+                    tel = payload.get('telefono')
+                    if tel: sms = f"In Houston: Hola {cn}. Confirmamos cita {fs} {hs}."; print(f"🔄 SMS a {tel}..."); m = twilio_client.messages.create(body=sms, from_=TWILIO_PHONE_NUMBER, to=tel); print(f"✅ SMS SID: {m.sid}")
+                    else: print("⚠️ No tel para SMS.")
                 except Exception as sms_error:
-                    # Si falla el SMS, no detenemos todo. Solo lo registramos.
-                    print(f"⚠️ Falló envío SMS (pero CITA FUE AGENDADA). Error: {sms_error}")
-            # --- FIN: Enviar SMS ---
-
-            return JSONResponse(status_code=200, content={"status":"success", "message":success_message})
-        else:
-             # Si el Apps Script falla o devuelve un error
-            return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','Error desconocido Webhook.')})
-
-    # --- EXCEPT DEL TRY PRINCIPAL (Indentación corregida) ---
-    except HTTPException as h:
-        return JSONResponse(status_code=h.status_code, content={"error": h.detail})
-    except Exception as e:
-        print(f"💥 Error grave en /agendar_cita: {e}")
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
-# ==========================================================
-# === FIN FUNCIÓN CORREGIDA ================================
-# ==========================================================
-
+                    print(f"⚠️ Falló envío SMS (CITA AGENDADA). Error: {sms_error}")
+            return JSONResponse(status_code=200, content={"status":"success", "message":msg})
+        else: return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','?')})
+    except HTTPException as h: return JSONResponse(status_code=h.status_code, content={"error":h.detail})
+    except Exception as e: print(f"💥 Error /agendar_cita: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error":"internal_error", "detail":str(e)})
 
 # =================================================================
 # === INICIO: LÓGICA DEL PANEL AGENTES ============================
