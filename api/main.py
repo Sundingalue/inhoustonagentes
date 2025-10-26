@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import time
 import io
 import csv
-import pandas as pd
+import pandas as pd # Importar Pandas
 
 # Importar las funciones del servicio
 from services.elevenlabs_service import (
@@ -128,7 +128,6 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
-    # *** CORRECCIÓN: Inicializar sig_header para evitar UnboundLocalError ***
     sig_header = None 
     try:
         body_bytes = await request.body()
@@ -167,7 +166,8 @@ class CitaPayload(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         required = ["cliente_nombre", "fecha", "hora", "telefono"]
-        if not all(k in self for k in required): raise ValueError(f"Faltan keys: {required}")
+        if not all(k in self for k in required):
+             raise ValueError(f"Faltan keys: {required}")
 
 @app.post("/agendar_cita")
 async def agendar_cita_endpoint(request: Request):
@@ -256,7 +256,7 @@ async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
 async def get_agent_data(request: AgentDataRequest, agent: AgentData = Depends(get_current_agent)):
     cfg = agent.config; aid = cfg.get('elevenlabs_agent_id'); ph=cfg.get('phone_number'); name=cfg.get('name',agent.bot_slug)
     if not aid: raise HTTPException(400, "Falta agent_id en JSON")
-    try: start_ts = int(time.mktime(datetime.strptime(request.start_date,'%Y-%m-%d').timetuple())); end_dt=datetime.strptime(request.end_date,'%Y-%m-%d')+timedelta(days=1,seconds=-1); end_ts=int(time.mkmo(end_dt.timetuple()))
+    try: start_ts = int(time.mktime(datetime.strptime(request.start_date,'%Y-%m-%d').timetuple())); end_dt=datetime.strptime(request.end_date,'%Y-%m-%d')+timedelta(days=1,seconds=-1); end_ts=int(time.mktime(end_dt.timetuple()))
     except ValueError: raise HTTPException(400, "Fecha inválida YYYY-MM-DD")
     res = get_agent_consumption_data(agent_id=aid, start_unix_ts=start_ts, end_unix_ts=end_ts)
     if not res["ok"]: print(f"Error consumo: {res.get('error','?')}"); cd={"calls":0,"credits":0,"minutes":0}
@@ -267,15 +267,8 @@ async def get_agent_data(request: AgentDataRequest, agent: AgentData = Depends(g
     final = {"agent_name":name,"phone_number":ph,"calls":cd["calls"],"credits_consumed":cd["credits"],"total_cost_usd":cost}
     return JSONResponse({"ok":True, "data":final})
 
-# ==========================================================
-# === MODIFICACIÓN PARA VARIABLES DINÁMICAS ===============
-# ==========================================================
 @app.post("/agent/start-batch-call")
-async def handle_batch_call(
-    agent: AgentData = Depends(get_current_agent),
-    batch_name: str = Form(...),
-    csv_file: UploadFile = File(...)
-):
+async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch_name: str = Form(...), csv_file: UploadFile = File(...)):
     bot_config = agent.config; filename = csv_file.filename.lower()
     allowed_extensions = ('.csv', '.xls', '.xlsx')
     if not filename.endswith(allowed_extensions): raise HTTPException(400, f"Formato no soportado. Usar {', '.join(allowed_extensions)}")
@@ -288,10 +281,8 @@ async def handle_batch_call(
         elif filename.endswith(('.xls', '.xlsx')): df = pd.read_excel(file_like_object)
         if df is None: raise ValueError("No se pudo leer archivo con pandas.")
         
-        # --- Limpiar nombres de columnas ---
         df.columns = [re.sub(r'\s+', '_', re.sub(r'[^\w\s]', '', col)).lower() for col in df.columns]
 
-        # --- Verificar y renombrar columna 'phone_number' ---
         if 'phone_number' not in df.columns:
             phone_col_candidates = ['telefono', 'teléfono', 'numero', 'número', 'phone']
             for col in df.columns:
@@ -301,7 +292,6 @@ async def handle_batch_call(
             if 'phone_number' not in df.columns:
                  raise HTTPException(400, "El archivo debe contener una columna 'phone_number' (o similar)")
 
-        # --- Convertir fila a diccionario y preparar variables dinámicas ---
         df = df.astype(str)
         df.fillna('', inplace=True)
         recipients_data = df.to_dict(orient='records')
@@ -310,37 +300,26 @@ async def handle_batch_call(
             phone = str(row_dict.get('phone_number', '')).strip()
             if not phone: continue
 
-            # Preparar diccionario de variables dinámicas (todas las columnas excepto phone_number)
             dynamic_vars = {k: v for k, v in row_dict.items() if k != 'phone_number'}
 
-            # Crear el objeto recipient con las variables anidadas
             recipient_info = {
                 'phone_number': phone,
-                # *** CORRECCIÓN CLAVE: ENVIAR TODAS LAS OTRAS COLUMNAS COMO METADATA ***
                 'dynamic_variables': dynamic_vars
             }
             recipients.append(recipient_info)
 
     except HTTPException as http_ex: raise http_ex
-    except Exception as e:
-        print(f"💥 Error procesando archivo: {e}"); traceback.print_exc()
-        raise HTTPException(400, f"Error al procesar el archivo: {e}")
-        
+    except Exception as e: print(f"💥 Error procesando archivo: {e}"); traceback.print_exc(); raise HTTPException(400, f"Error al procesar el archivo: {e}")
     if not recipients: raise HTTPException(400, "Archivo no contiene destinatarios válidos")
-
-    # --- Enviar a ElevenLabs ---
     print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} ({len(recipients)} dest.)")
     result = start_batch_call(
         call_name=batch_name,
         agent_id=agent_id,
         phone_number_id=phone_number_id,
-        recipients_json=recipients # Pasar la lista con dynamic_variables
+        recipients_json=recipients
     )
     if not result["ok"]: raise HTTPException(500, result["error"])
     return JSONResponse({"ok": True, "data": result["data"]})
-# ==========================================================
-# === FIN MODIFICACIÓN =====================================
-# ==========================================================
 
 # =================================================================
 # === FIN: LÓGICA DEL PANEL AGENTES ===============================
