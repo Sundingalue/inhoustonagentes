@@ -16,7 +16,6 @@ print(f"[ElevenLabs] Usando tasa fallback de créditos/seg: {FALLBACK_CREDITS_PE
 
 # --- Funciones existentes (sin cambios) ---
 def start_conversation_with_agent(agent_id, input_text=None):
-    # ... (código sin cambios) ...
     url = f"https://api.elevenlabs.io/v1/agents/{agent_id}/conversation"
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {"message": input_text} if input_text else {}
@@ -29,14 +28,12 @@ def start_conversation_with_agent(agent_id, input_text=None):
         return {"error": f"Error al iniciar conversación"}
 
 def _eleven_request(method, endpoint, payload=None, params=None):
-    # ... (código sin cambios) ...
     if not ELEVENLABS_API_KEY:
         print("[ElevenLabs] Error: API Key no configurada.")
         return {"ok": False, "error": "API Key no configurada"}
     url = f"{ELEVEN_API_BASE}{endpoint}"
     headers = {"Accept": "application/json", "xi-api-key": ELEVENLABS_API_KEY}
     try:
-        # Quitamos logs DEBUG para limpieza
         if method.upper() == "GET":
             response = requests.get(url, headers=headers, params=params)
         elif method.upper() == "POST":
@@ -59,94 +56,75 @@ def _eleven_request(method, endpoint, payload=None, params=None):
         return {"ok": False, "error": f"Error conexión: {req_err}"}
 
 def get_eleven_agents():
-    # ... (código sin cambios) ...
     print("[ElevenLabs] Obteniendo agentes...")
     return _eleven_request("GET", "/convai/agents")
 
 def get_eleven_phone_numbers():
-    # ... (código sin cambios) ...
     print("[ElevenLabs] Obteniendo números...")
     return _eleven_request("GET", "/convai/phone-numbers")
 
 # ===================================================================
-# === FUNCIÓN FINAL (CON FILTRADO LOCAL DE FECHA 'DESDE') =========
+# === FUNCIÓN FINAL (CON FILTRADO LOCAL CORREGIDO) ================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     """
     Obtiene consumo usando /conversations con paginación (cursor),
-    SOLO filtra por fecha FIN en la API, y luego filtra por fecha INICIO localmente.
+    SOLO filtra por fecha FIN en la API, y luego filtra por fecha INICIO localmente (CORREGIDO).
     Calcula créditos usando fallback.
     """
     print(f"[ElevenLabs] Obteniendo conversaciones ANTES de {end_unix_ts} para Agente ID: {agent_id}...")
     
     endpoint = "/convai/conversations"
-    all_conversations = [] # Lista para guardar TODAS las conversaciones antes de filtrar
+    all_conversations = [] 
     
     has_more = True
     next_cursor = None
     page_num = 1 
-    max_pages = 50 # Límite de seguridad
+    max_pages = 50 
 
     while has_more and page_num <= max_pages:
-        # print(f"[ElevenLabs] Solicitando página {page_num}...") # Log opcional
-        params = {
-            "agent_id": agent_id,
-            "page_size": 30 
-        }
-        
-        # *** SOLO ENVIAR FECHA FIN (call_start_before_unix) la primera vez ***
-        # *** Ya no enviamos la fecha de inicio a la API ***
+        params = { "agent_id": agent_id, "page_size": 30 }
         if not next_cursor:
             params["call_start_before_unix"] = int(end_unix_ts) 
         else:
             params["cursor"] = next_cursor 
         
-        # print(f"DEBUG: Params enviados a la API: {params}") # Log opcional
         result = _eleven_request("GET", endpoint, params=params)
         
         if not result["ok"]:
             print(f"[ElevenLabs] Error al obtener la página {page_num}: {result.get('error')}")
-            # Si falla una página, continuamos con lo que tenemos
             break 
 
         data = result.get("data", {})
         conversations_page = data.get("conversations", [])
-        
-        if not conversations_page:
-            # print(f"[ElevenLabs] Página {page_num} vacía. Fin.") # Log opcional
-            break # Salir si no hay conversaciones
-            
-        # --- Guardar conversaciones de esta página ---
+        if not conversations_page: break 
         all_conversations.extend(conversations_page) 
-        
-        # --- Preparar el siguiente bucle ---
         has_more = data.get("has_more", False)
         next_cursor = data.get("next_cursor", None) 
-        
-        # print(f"[ElevenLabs] Página {page_num} recibida. {len(all_conversations)} conversaciones acumuladas.") # Log opcional
-        
-        if not has_more or not next_cursor:
-            # print("[ElevenLabs] Fin de la paginación según la API.") # Log opcional
-            break 
-            
+        if not has_more or not next_cursor: break 
         page_num += 1
 
-    # --- FIN DEL BUCLE: Ya tenemos all_conversations ---
-    if page_num > max_pages: print(f"[ElevenLabs] ADVERTENCIA: Límite de {max_pages} páginas alcanzado.")
-    print(f"[ElevenLabs] Total conversaciones recibidas ANTES de filtrar por fecha inicio: {len(all_conversations)}")
+    if page_num > max_pages: print(f"[ElevenLabs] ADVERTENCIA: Límite de {max_pages} páginas.")
+    print(f"[ElevenLabs] Total conversaciones recibidas ANTES de filtrar: {len(all_conversations)}")
 
-    # --- AHORA FILTRAMOS LOCALMENTE POR FECHA DE INICIO ---
+    # --- FILTRADO LOCAL POR FECHA DE INICIO (CORREGIDO) ---
     filtered_conversations = []
-    start_filter_ts = int(start_unix_ts) # Asegurar que es entero
+    start_filter_ts = int(start_unix_ts) 
     
     for convo in all_conversations:
          if isinstance(convo, dict):
-             # Obtener el timestamp de inicio de la conversación
-             # Probamos varios campos posibles donde podría estar
-             convo_start_ts = convo.get("start_time_unix_secs", convo.get("start_unix_secs", convo.get("call_start_unix", 0)))
-             
-             # Comparar con la fecha "Desde" seleccionada
-             if convo_start_ts >= start_filter_ts:
+             # *** CORRECCIÓN: Leer el campo correcto y convertir a int ***
+             convo_start_value = convo.get("start_time_unix_secs") # Leer el campo correcto
+
+             # Intentar convertir a entero, si falla o no existe, saltar esta llamada
+             try:
+                 convo_start_num = int(convo_start_value)
+             except (ValueError, TypeError, TypeError): # Atrapar si es None o no es número
+                 print(f"DEBUG WARNING: Timestamp inválido o ausente ('{convo_start_value}') para convo {convo.get('conversation_id')}. Saltando.")
+                 continue # Ir a la siguiente conversación
+
+             # *** CORRECCIÓN: Comparar números enteros ***
+             if convo_start_num >= start_filter_ts:
                  filtered_conversations.append(convo)
 
     print(f"[ElevenLabs] Total conversaciones DESPUÉS de filtrar por fecha inicio ({start_filter_ts}): {len(filtered_conversations)}")
@@ -157,20 +135,16 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     total_seconds = 0.0
 
     for convo in filtered_conversations:
-        # Reutilizamos la lógica de cálculo que ya teníamos
         call_status = convo.get('call_successful', 'success') 
         if call_status != 'success': continue
 
         total_calls += 1
         secs = float(convo.get("call_duration_secs", convo.get("duration_secs", 0.0)))
         total_seconds += secs
-
-        # Usar Fallback para créditos
         if secs > 0:
             calculated_credits = secs * FALLBACK_CREDITS_PER_SEC
             total_credits += calculated_credits
 
-    # --- Fin del cálculo ---
     print(f"[ElevenLabs] Consumo total final calculado (filtrado): {total_calls} llamadas, {total_credits:.4f} créditos.")
     
     normalized_data = {
@@ -181,12 +155,11 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     }
     return {"ok": True, "data": normalized_data}
 # ===================================================================
-# === FIN DE LA FUNCIÓN CON FILTRO LOCAL ============================
+# === FIN DE LA FUNCIÓN CON FILTRO LOCAL CORREGIDO ==================
 # ===================================================================
 
 # --- Función start_batch_call (sin cambios) ---
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
-    # ... (código sin cambios) ...
     print(f"[ElevenLabs] Iniciando lote: {call_name} (Agente: {agent_id})")
     endpoint = "/convai/batch-calling/submit"
     payload = {"call_name": call_name, "agent_id": agent_id, "agent_phone_number_id": phone_number_id, "recipients": recipients_json}
