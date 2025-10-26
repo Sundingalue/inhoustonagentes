@@ -106,7 +106,7 @@ def get_eleven_phone_numbers():
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
 # ===================================================================
-# === FUNCIÓN CORREGIDA (VERSIÓN INTELIGENTE) =======================
+# === FUNCIÓN CORREGIDA (CON PAGINACIÓN) ============================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
@@ -114,58 +114,77 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     específico en un rango de fechas.
     
     ¡CORREGIDO! Usa el endpoint /conversations y suma los totales.
+    ¡CON PAGINACIÓN! Maneja múltiples páginas de resultados.
     (API: GET /v1/convai/conversations)
     """
-    print(f"[ElevenLabs] Obteniendo conversaciones para Agente ID: {agent_id}...")
+    print(f"[ElevenLabs] Obteniendo TODAS las conversaciones para Agente ID: {agent_id}...")
     
     endpoint = "/convai/conversations"
-    params = {
-        "agent_id": agent_id,
-        "start_unix": int(start_unix),
-        "end_unix": int(end_unix)
-        # Nota: La API parece tener un límite por defecto, 
-        # pero asumiremos que no hay más de 1000 llamadas en el rango
-    }
     
-    result = _eleven_request("GET", endpoint, params=params)
-    
-    if not result["ok"]:
-        return result # Devuelve el error (ej. 401, 500)
-
-    # La API devuelve un objeto con una clave "conversations" que es una lista
-    conversations = result.get("data", {}).get("conversations", [])
-    
-    if not conversations:
-        print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
-        # No es un error, solo no hay datos. Devolvemos 0.
-        return {"ok": True, "data": {
-            "agent_id": agent_id,
-            "calls": 0,
-            "duration_secs": 0,
-            "credits": 0
-        }}
-
-    # Ahora, sumamos el consumo de todas las conversaciones encontradas
+    # Totales
     total_calls = 0
     total_credits = 0
     total_seconds = 0
     
-    for convo in conversations:
-        if isinstance(convo, dict):
-            total_calls += 1
-            
-            # ==========================================================
-            # === ¡LA CORRECCIÓN INTELIGENTE ESTÁ AQUÍ! ================
-            # ==========================================================
-            # Intenta encontrar el costo de créditos en CUALQUIERA de estos campos
-            credits = convo.get("credit_usage", convo.get("credits_used", convo.get("credit_cost", 0)))
-            
-            total_credits += credits
-            total_seconds += convo.get("duration_secs", 0)
-
-    print(f"[ElevenLabs] Consumo total calculado: {total_calls} llamadas, {total_credits} créditos.")
+    # Control de paginación
+    has_more = True
+    last_convo_id = None
     
-    # Devolvemos el mismo formato que la función original esperaba
+    page_num = 1 # Para logging
+
+    while has_more:
+        print(f"[ElevenLabs] Solicitando página {page_num}...")
+        params = {
+            "agent_id": agent_id,
+            "start_unix": int(start_unix),
+            "end_unix": int(end_unix)
+            # "page_size": 30 # (El default es 30, lo dejamos así)
+        }
+        
+        if last_convo_id:
+            params["after_conversation_id"] = last_convo_id
+        
+        # --- Hacer la llamada ---
+        result = _eleven_request("GET", endpoint, params=params)
+        
+        if not result["ok"]:
+            # Si falla cualquier página, debemos parar y reportar el error
+            print(f"[ElevenLabs] Error al obtener la página {page_num}.")
+            return result # Devuelve el error (ej. 401, 500)
+
+        # --- Procesar la página ---
+        data = result.get("data", {})
+        conversations_page = data.get("conversations", [])
+        
+        if not conversations_page and page_num == 1:
+            # Caso especial: No hay llamadas en absoluto
+            print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
+            return {"ok": True, "data": {"agent_id": agent_id, "calls": 0, "duration_secs": 0, "credits": 0}}
+        
+        # Sumar los totales de esta página
+        for convo in conversations_page:
+            if isinstance(convo, dict):
+                total_calls += 1
+                # La lógica "inteligente" que ya teníamos
+                credits = convo.get("credit_usage", convo.get("credits_used", convo.get("credit_cost", 0)))
+                total_credits += credits
+                total_seconds += convo.get("duration_secs", 0)
+
+        # --- Preparar el siguiente bucle ---
+        has_more = data.get("has_more", False)
+        last_convo_id = data.get("last_conversation_id", None)
+        page_num += 1
+        
+        if not has_more or not last_convo_id:
+            # Salimos del bucle si la API dice que no hay más, o si no nos da un cursor
+            print("[ElevenLabs] No hay más páginas.")
+            break
+        
+        print(f"[ElevenLabs] Página procesada. Total parcial: {total_calls} llamadas. Pidiendo siguiente página...")
+
+    # Fin del bucle while
+    print(f"[ElevenLabs] Consumo total (con paginación) calculado: {total_calls} llamadas, {total_credits} créditos.")
+    
     normalized_data = {
         "agent_id": agent_id,
         "calls": total_calls,
