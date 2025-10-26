@@ -58,6 +58,8 @@ def _eleven_request(method, endpoint, payload=None, params=None):
     }
     
     try:
+        print(f"DEBUG: Enviando petición {method} a {url} con params: {params}") # DEBUG
+        
         if method.upper() == "GET":
             response = requests.get(url, headers=headers, params=params)
         elif method.upper() == "POST":
@@ -67,7 +69,9 @@ def _eleven_request(method, endpoint, payload=None, params=None):
             return {"ok": False, "error": f"Método HTTP no soportado: {method}"}
 
         # Lanza un error si la petición falla (ej. 401, 404, 500)
-        response.raise_for_status() 
+        response.raise_for_status()
+        
+        print("DEBUG: Petición exitosa (200 OK)") # DEBUG
         return {"ok": True, "data": response.json()}
     
     except requests.exceptions.HTTPError as http_err:
@@ -106,16 +110,14 @@ def get_eleven_phone_numbers():
 # --- 2. Funciones para el Panel de Agente (Cliente) ---
 
 # ===================================================================
-# === FUNCIÓN CORREGIDA (CON PAGINACIÓN) ============================
+# === FUNCIÓN CON DEPURACIÓN ========================================
 # ===================================================================
 def get_agent_consumption_data(agent_id, start_unix, end_unix):
     """
     Obtiene los datos de consumo (llamadas, créditos, etc.) para UN agente 
     específico en un rango de fechas.
     
-    ¡CORREGIDO! Usa el endpoint /conversations y suma los totales.
-    ¡CON PAGINACIÓN! Maneja múltiples páginas de resultados.
-    (API: GET /v1/convai/conversations)
+    ¡CON DEPURACIÓN!
     """
     print(f"[ElevenLabs] Obteniendo TODAS las conversaciones para Agente ID: {agent_id}...")
     
@@ -133,31 +135,41 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     page_num = 1 # Para logging
 
     while has_more:
-        print(f"[ElevenLabs] Solicitando página {page_num}...")
+        print(f"DEBUG: Entrando al bucle, Página {page_num}")
         params = {
             "agent_id": agent_id,
             "start_unix": int(start_unix),
-            "end_unix": int(end_unix)
-            # "page_size": 30 # (El default es 30, lo dejamos así)
+            "end_unix": int(end_unix),
+            "page_size": 30 # (Lo ponemos explícito)
         }
         
         if last_convo_id:
+            print(f"DEBUG: Pidiendo página CON 'after_conversation_id': {last_convo_id}")
             params["after_conversation_id"] = last_convo_id
+        else:
+            print("DEBUG: Pidiendo página SIN 'after_conversation_id' (es la primera)")
         
         # --- Hacer la llamada ---
         result = _eleven_request("GET", endpoint, params=params)
         
         if not result["ok"]:
-            # Si falla cualquier página, debemos parar y reportar el error
             print(f"[ElevenLabs] Error al obtener la página {page_num}.")
-            return result # Devuelve el error (ej. 401, 500)
+            return result 
 
         # --- Procesar la página ---
         data = result.get("data", {})
         conversations_page = data.get("conversations", [])
         
+        # +++++ LÍNEAS DE DEPURACIÓN CLAVE +++++
+        page_has_more = data.get("has_more", False)
+        page_last_convo_id = data.get("last_conversation_id", None)
+        print(f"DEBUG: Página {page_num} recibida.")
+        print(f"DEBUG: Conversaciones en esta página: {len(conversations_page)}")
+        print(f"DEBUG: API dice 'has_more': {page_has_more}")
+        print(f"DEBUG: API dice 'last_conversation_id': {page_last_convo_id}")
+        # +++++++++++++++++++++++++++++++++++++++
+        
         if not conversations_page and page_num == 1:
-            # Caso especial: No hay llamadas en absoluto
             print(f"[ElevenLabs] No se encontraron conversaciones para {agent_id} en ese rango.")
             return {"ok": True, "data": {"agent_id": agent_id, "calls": 0, "duration_secs": 0, "credits": 0}}
         
@@ -165,19 +177,21 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
         for convo in conversations_page:
             if isinstance(convo, dict):
                 total_calls += 1
-                # La lógica "inteligente" que ya teníamos
                 credits = convo.get("credit_usage", convo.get("credits_used", convo.get("credit_cost", 0)))
                 total_credits += credits
                 total_seconds += convo.get("duration_secs", 0)
 
         # --- Preparar el siguiente bucle ---
-        has_more = data.get("has_more", False)
-        last_convo_id = data.get("last_conversation_id", None)
+        has_more = page_has_more # Actualizamos el 'has_more' del bucle
+        last_convo_id = page_last_convo_id # Actualizamos el cursor
         page_num += 1
         
-        if not has_more or not last_convo_id:
-            # Salimos del bucle si la API dice que no hay más, o si no nos da un cursor
-            print("[ElevenLabs] No hay más páginas.")
+        if not has_more:
+            print("DEBUG: 'has_more' es False. Saliendo del bucle.")
+            break
+            
+        if not last_convo_id:
+            print("DEBUG: 'last_conversation_id' es None. Saliendo del bucle para evitar loop infinito.")
             break
         
         print(f"[ElevenLabs] Página procesada. Total parcial: {total_calls} llamadas. Pidiendo siguiente página...")
@@ -193,7 +207,7 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     }
     return {"ok": True, "data": normalized_data}
 # ===================================================================
-# === FIN DE LA FUNCIÓN CORREGIDA ===================================
+# === FIN DE LA FUNCIÓN CON DEPURACIÓN ==============================
 # ===================================================================
 
 
