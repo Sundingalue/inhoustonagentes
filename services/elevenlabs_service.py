@@ -4,7 +4,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
-# === Config básica (como antes) ===
+# === Config básica ===
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
 BASE_URL   = "https://api.elevenlabs.io"
 DEFAULT_TIMEOUT = 30
@@ -40,7 +40,7 @@ def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
 def _retryable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 
-# ---------- Admin: Agentes / Números (SIN CAMBIOS) ----------
+# ---------- Admin: Agentes / Números ----------
 def get_eleven_agents() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/agents"
     status, data, err, _ = _http("GET", url, None)
@@ -59,74 +59,105 @@ def get_eleven_phone_numbers() -> Dict[str, Any]:
         return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
-# ---------- MÉTRICAS (con fallbacks automáticos, sin envs) ----------
+# ---------- Normalizadores ----------
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
 def _normalize_metrics(payload: Any) -> Dict[str, Any]:
     """
-    Normaliza a {calls, credits, duration_secs} tolerando nombres y envolturas típicas.
-    Acepta:
-      - dict plano
-      - dict con 'data'
-      - lista de buckets
-      - { "analytics": ... } / { "data": { "analytics": ... } }
+    Normaliza a {calls, credits, duration_secs} tolerando dict/list y envolturas {data}, {analytics}.
     """
     if payload is None:
         return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
 
-    # Si viene lista de buckets:
+    # Lista de buckets
     if isinstance(payload, list):
         calls = 0; credits = 0.0; dur_s = 0.0
         for row in payload:
             if not isinstance(row, dict): continue
-            calls   += int(row.get("calls") or row.get("total_calls") or 0)
-            credits += float(row.get("credits") or row.get("total_credits") or 0.0)
-            dur_s   += float(row.get("duration_secs") or row.get("total_duration_secs") or row.get("seconds") or 0.0)
+            calls   += _safe_int(row.get("calls") or row.get("total_calls") or 0)
+            credits += _safe_float(row.get("credits") or row.get("total_credits") or row.get("credits_consumed") or 0.0)
+            dur_s   += _safe_float(row.get("duration_secs") or row.get("total_duration_secs") or row.get("seconds") or 0.0)
         return {"calls": calls, "credits": credits, "duration_secs": dur_s}
 
     if not isinstance(payload, dict):
         return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
 
     d = payload
-    # Envolturas comunes
     if "data" in d and isinstance(d["data"], (dict, list)):
-        d = d["data"]
-        if isinstance(d, list):
-            return _normalize_metrics(d)
+        return _normalize_metrics(d["data"])
     if "analytics" in d and isinstance(d["analytics"], (dict, list)):
         return _normalize_metrics(d["analytics"])
 
     calls   = d.get("calls", d.get("total_calls", d.get("outbound_calls", 0)))
     credits = d.get("credits", d.get("total_credits", d.get("credits_consumed", 0.0)))
     dur_s   = d.get("duration_secs", d.get("total_duration_secs", d.get("seconds", 0.0)))
+    return {
+        "calls": _safe_int(calls),
+        "credits": _safe_float(credits),
+        "duration_secs": _safe_float(dur_s),
+    }
 
-    try:
-        return {
-            "calls": int(calls or 0),
-            "credits": float(credits or 0.0),
-            "duration_secs": float(dur_s or 0.0),
-        }
-    except Exception:
-        return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
+def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
+    """
+    Suma conversaciones a partir de GET /v1/convai/conversations (fallback oficial).
+    Busca claves frecuentes: credits/credits_consumed, duration_secs/call_duration_seconds,
+    o calcula a partir de timestamps.
+    """
+    calls = 0; credits = 0.0; dur_s = 0.0
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], list):
+        items = payload["data"]
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = payload.get("conversations", []) if isinstance(payload, dict) else []
 
+    for c in items:
+        if not isinstance(c, dict): continue
+        calls += 1
+        # créditos
+        cr = (c.get("credits"), c.get("credits_consumed"), c.get("usage_credits"), c.get("cost_credits"))
+        credits += next((_safe_float(v) for v in cr if v is not None), 0.0)
+        # duración
+        dur = (c.get("duration_secs"), c.get("call_duration_seconds"), c.get("duration_seconds"))
+        dsec = next((_safe_float(v) for v in dur if v is not None), None)
+        if dsec is None:
+            # calcular por timestamps si existen
+            start_ts = c.get("call_start_unix") or c.get("start_unix")
+            end_ts   = c.get("call_end_unix")   or c.get("end_unix")
+            if start_ts and end_ts:
+                dsec = max(0.0, _safe_float(end_ts) - _safe_float(start_ts))
+            else:
+                dsec = 0.0
+        dur_s += dsec
+    return {"calls": calls, "credits": credits, "duration_secs": dur_s}
+
+# ---------- Métricas con fallback ----------
 def _try_metrics_variant(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
-                         params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Dict[str, Any], str]:
-    """Ejecuta una variante, devuelve (ok, data_norm, debug_msg)."""
+                         params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Dict[str, Any], str, int]:
     status, data, err, meta = _http(method, url, json_body=json_body, params=params)
     dbg = f"[metrics] {method} {meta.get('url')} -> status={status} err={err}"
     if err:
-        return False, {"error": f"HTTP error: {err}"}, dbg
+        return False, {"error": f"HTTP error: {err}"}, dbg, status
     if 200 <= status < 300:
         norm = _normalize_metrics(data)
-        return True, {"ok": True, "data": norm}, dbg
-    return False, {"error": f"ElevenLabs error {status}: {str(data)[:200]}"}, dbg
+        return True, {"ok": True, "data": norm}, dbg, status
+    return False, {"error": f"ElevenLabs error {status}: {str(data)[:200]}"}, dbg, status
 
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Intenta recuperar métricas probando variantes comunes SIN tocar envs:
-      1) POST /v1/convai/analytics/agent con {agent_id, start_unix_ts, end_unix_ts}
-      2) POST idem con {agentId, startUnixTs, endUnixTs}
-      3) GET  /v1/convai/analytics/agent con params (snake)
-      4) GET  /v1/convai/analytics/agent con params (camel)
-    Si alguna responde 2xx, normaliza y retorna.
+    1) Intenta el endpoint legacy (si existe en tu cuenta).
+    2) Si responde 404, usa Fallback: GET /v1/convai/conversations con filtros de fecha y suma.
+       (En abril/2025 añadieron filtros de historial en List Conversations).  # ver changelog
     """
     base = f"{BASE_URL}/v1/convai/analytics/agent"
     variants = [
@@ -137,25 +168,64 @@ def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: i
     ]
 
     delay = 1.0
+    last_status = None
     last_error = "Unknown error"
     debug_lines: List[str] = []
 
     for attempt in range(1, MAX_RETRIES + 1):
         for (method, url, body, params) in variants:
-            ok, res, dbg = _try_metrics_variant(method, url, json_body=body, params=params)
+            ok, res, dbg, status = _try_metrics_variant(method, url, json_body=body, params=params)
             print(dbg)
             debug_lines.append(dbg)
+            last_status = status
             if ok:
                 return res
             last_error = res.get("error", last_error)
 
-        # Si llegamos aquí, todas fallaron este intento
+        # si 404 repetido -> pasar a conversations fallback de inmediato
+        if last_status == 404:
+            break
         if attempt < MAX_RETRIES:
             time.sleep(delay); delay *= RETRY_BACKOFF
 
-    return {"ok": False, "error": last_error, "debug": debug_lines[-2:]}
+    # --- Fallback oficial: List Conversations + filtros de fecha ---
+    # Nota: En el changelog mencionan filtros de historial por fecha en List Conversations.
+    # Usamos parámetros comunes; si tu cuenta usa nombres distintos, ElevenLabs igualmente
+    # ignora los desconocidos y devuelve 200 con todo el rango.
+    conv_url = f"{BASE_URL}/v1/convai/conversations"
+    conv_params = {
+        "agent_id": agent_id,
+        # nombres de filtros más probables (after/before)
+        "call_start_after_unix":  start_unix_ts,
+        "call_start_before_unix": end_unix_ts,
+        # algunos tenants usan start/end_unix o created_*; mandamos todos inofensivamente
+        "start_unix": start_unix_ts,
+        "end_unix":   end_unix_ts,
+        "limit": 1000,  # por si hay muchas (ajusta si tu cuenta pagina distinto)
+    }
 
-# ---------- OUTBOUND (LOTE) — SE MANTIENE ----------
+    delay = 1.0
+    for attempt in range(1, MAX_RETRIES + 1):
+        status, data, err, meta = _http("GET", conv_url, params=conv_params)
+        dbg = f"[metrics-fallback] GET {meta.get('url')} -> status={status} err={err}"
+        print(dbg)
+        debug_lines.append(dbg)
+        if err:
+            if attempt >= MAX_RETRIES:
+                return {"ok": False, "error": f"HTTP error: {err}", "debug": debug_lines[-6:]}
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
+        if 200 <= status < 300:
+            norm = _normalize_conversations_list(data)
+            return {"ok": True, "data": norm}
+        if _retryable(status):
+            if attempt >= MAX_RETRIES:
+                return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}", "debug": debug_lines[-6:]}
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
+        return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}", "debug": debug_lines[-6:]}
+
+    return {"ok": False, "error": last_error, "debug": debug_lines[-6:]}
+
+# ---------- OUTBOUND (LOTE) (sin cambios) ----------
 def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
     dyn: Dict[str, Any] = {}
     for k, v in recipient.items():
@@ -212,7 +282,7 @@ def start_batch_call(call_name: str, agent_id: str, phone_number_id: str,
             failures.append({"phone_number":"","error":"Fila sin phone_number","status":0,"payload_sample":r})
             continue
 
-        dyn = _build_dynamic_variables(r)  # <-- mantiene name, last_name, etc.
+        dyn = _build_dynamic_variables(r)  # deja name, last_name, etc.
         ok, data, err, status = _post_outbound_call(agent_id, phone_number_id, to, dyn)
         if ok:
             sent += 1
