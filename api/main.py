@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import time
 import io
 import csv
-import pandas as pd 
+import pandas as pd # Importar Pandas
 
 # Importar las funciones del servicio
 from services.elevenlabs_service import (
@@ -51,9 +51,9 @@ if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     except Exception as e: print(f"⚠️ Error Twilio: {e}")
 else: print("⚠️ Faltan variables Twilio.")
 
-# (Funciones de Mapeo, Webhook y Agendamiento omitidas por brevedad, asumiendo que están correctas)
-# (Incluir aquí el código completo de esas funciones)
-# ...
+# =========================
+# Lógica de Mapeo y Helpers
+# =========================
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
@@ -113,6 +113,9 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception: pass
     return {"agent_id": agent_id, "transcript_text": transcript_text, "caller": caller, "called": called, "timestamp": root.get("timestamp") or data.get("timestamp"), "raw": data}
 
+# =========================
+# Webhook y Endpoints Agendamiento
+# =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
     sig_header = None 
@@ -291,18 +294,18 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
                 if key != 'phone_number':
-                    # --- CORRECCIÓN FINAL DE VARIABLES ---
-                    # Normalizar nombres para coincidir con las variables más comunes
+                    # --- LÓGICA DE NORMALIZACIÓN A MINÚSCULAS ---
+                    # Elimina guiones bajos y deja solo la palabra en minúsculas
                     clean_key = key.replace('_', '') 
                     
                     if clean_key == 'name':
-                        # Forzar la clave a 'Name' (mayúscula) para compatibilidad con el Agente de ElevenLabs
-                        recipient_info['Name'] = str(value) 
+                        # Forzar la clave a 'name' (minúscula)
+                        recipient_info['name'] = str(value) 
                     elif clean_key == 'lastname':
-                        # Forzar la clave a 'Last_Name' (o Lastname) para compatibilidad
-                        recipient_info['Last_Name'] = str(value) 
+                        # Forzar la clave a 'last_name' (minúscula)
+                        recipient_info['last_name'] = str(value) 
                     elif key != 'phone_number':
-                        # Otras columnas van con su clave original limpia
+                        # Otras columnas (en minúscula)
                         recipient_info[clean_key] = str(value)
             
             recipients.append(recipient_info)
