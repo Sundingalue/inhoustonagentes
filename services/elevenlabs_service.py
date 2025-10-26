@@ -14,31 +14,21 @@ except ValueError:
     FALLBACK_CREDITS_PER_SEC = DEFAULT_CREDITS_PER_SEC_FALLBACK
 print(f"[ElevenLabs] Usando tasa fallback de créditos/seg: {FALLBACK_CREDITS_PER_SEC}")
 
-# --- Helper Function to make API requests ---
+# --- Helper Function to make API requests (sin cambios) ---
 def _eleven_request(method, endpoint, payload=None, params=None):
-    """Generic helper for ElevenLabs v1 API requests."""
-    if not ELEVENLABS_API_KEY:
-        print("[ElevenLabs] Error: API Key no configurada.")
-        return {"ok": False, "error": "API Key no configurada"}
+    if not ELEVENLABS_API_KEY: return {"ok": False, "error": "API Key no configurada"}
     url = f"{ELEVEN_API_BASE}{endpoint}"
     headers = {"Accept": "application/json", "xi-api-key": ELEVENLABS_API_KEY}
     try:
-        if method.upper() == "GET":
-            response = requests.get(url, headers=headers, params=params)
-        elif method.upper() == "POST":
-            headers["Content-Type"] = "application/json"
-            response = requests.post(url, headers=headers, json=payload)
-        else:
-            return {"ok": False, "error": f"Unsupported HTTP method: {method}"}
+        if method.upper() == "GET": response = requests.get(url, headers=headers, params=params)
+        elif method.upper() == "POST": headers["Content-Type"] = "application/json"; response = requests.post(url, headers=headers, json=payload)
+        else: return {"ok": False, "error": f"Unsupported HTTP method: {method}"}
         response.raise_for_status()
         return {"ok": True, "data": response.json()}
     except requests.exceptions.HTTPError as http_err:
         error_msg = http_err.response.text
-        try:
-            error_details = http_err.response.json()
-            error_msg = error_details.get('detail', {}).get('message', error_msg)
-        except json.JSONDecodeError:
-             pass
+        try: error_details = http_err.response.json(); error_msg = error_details.get('detail', {}).get('message', error_msg)
+        except json.JSONDecodeError: pass
         print(f"[ElevenLabs] API Error (HTTP {http_err.response.status_code}): {error_msg}")
         return {"ok": False, "error": f"API Error: {error_msg}"}
     except requests.exceptions.RequestException as req_err:
@@ -46,23 +36,15 @@ def _eleven_request(method, endpoint, payload=None, params=None):
         return {"ok": False, "error": f"Connection error: {req_err}"}
 
 # --- Funciones de sincronización y consumo (sin cambios) ---
-def get_eleven_agents():
-    print("[ElevenLabs] Getting agent list...")
-    return _eleven_request("GET", "/convai/agents")
-
-def get_eleven_phone_numbers():
-    print("[ElevenLabs] Getting phone number list...")
-    return _eleven_request("GET", "/convai/phone-numbers")
+def get_eleven_agents(): print("[ElevenLabs] Getting agent list..."); return _eleven_request("GET", "/convai/agents")
+def get_eleven_phone_numbers(): print("[ElevenLabs] Getting phone number list..."); return _eleven_request("GET", "/convai/phone-numbers")
 
 def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
     """Obtiene datos de consumo. (Mantenemos la lógica de filtrado local)."""
     print(f"[EL] Getting conversations BEFORE {end_unix_ts} for Agent ID: {agent_id}...")
-    endpoint = "/convai/conversations"
-    all_conversations = []
-    has_more, next_cursor, page_num, max_pages = True, None, 1, 50
-
+    endpoint = "/convai/conversations"; all_conversations = []; has_more, next_cursor, page_num, max_pages = True, None, 1, 50
     while has_more and page_num <= max_pages:
-        params = {"agent_id": agent_id, "page_size": 30}
+        params = {"agent_id": agent_id, "page_size": 30};
         if not next_cursor: params["call_start_before_unix"] = int(end_unix_ts)
         else: params["cursor"] = next_cursor
         result = _eleven_request("GET", endpoint, params=params)
@@ -72,10 +54,9 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
         all_conversations.extend(conversations_page)
         has_more = data.get("has_more", False); next_cursor = data.get("next_cursor", None)
         if not has_more or not next_cursor: break; page_num += 1
-
     if page_num > max_pages: print(f"[EL] WARN: Reached max pages limit ({max_pages}).")
     print(f"[EL] Received {len(all_conversations)} conversations BEFORE local filtering.")
-
+    
     filtered_conversations = []; start_filter_ts_int = int(start_unix_ts)
     for convo in all_conversations:
          if isinstance(convo, dict):
@@ -99,12 +80,12 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
 
 
 # ===================================================================
-# === FUNCIÓN CORREGIDA: VUELVE A COMPORTAMIENTO ORIGINAL DE LOTES ==
+# === FUNCIÓN FINAL: VUELVE A COMPORTAMIENTO ORIGINAL DE LOTES ==
 # ===================================================================
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
     """
-    Inicia una llamada por lotes (a múltiples destinatarios) sin forzar el inicio
-    inmediato (el comportamiento original de ElevenLabs).
+    Inicia una llamada por lotes (a múltiples destinatarios) usando el comportamiento
+    por defecto de ElevenLabs (no se fuerza la programación).
     """
     
     print(f"[EL] Initiating DEFAULT BATCH SUBMISSION: {call_name} for Agent: {agent_id} with {len(recipients_json)} recipients.")
@@ -116,10 +97,9 @@ def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
         "agent_id": agent_id,
         "agent_phone_number_id": phone_number_id,
         "recipients": recipients_json
-        # !!! QUITAMOS 'scheduled_time_unix' !!!
+        # Quitamos 'scheduled_time_unix'
     }
     
-    # Hacemos la llamada POST al endpoint de LOTES
     result = _eleven_request("POST", endpoint, payload=payload)
     
     if result.get("ok"):
