@@ -26,18 +26,14 @@ from services.elevenlabs_service import (
     start_batch_call
 )
 
-# =========================
-# Configuración y Carga
-# =========================
+# [Bloques de Configuración y Helpers Omitidos por brevedad, asumiendo que son correctos]
+# ... (Incluir código completo de main.py hasta la función handle_batch_call) ...
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'agents'); BOT_CONFIG_DIR = os.path.abspath(BOT_CONFIG_DIR)
 SECRET_ENV_PATH = "/etc/secrets/.env"
 if os.path.exists(SECRET_ENV_PATH): load_dotenv(SECRET_ENV_PATH); print(f"✅ .env cargado desde {SECRET_ENV_PATH}")
 else: load_dotenv(); print("⚠️ Usando .env local")
 
-# =========================
-# App y Handlers Base
-# =========================
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 print("✅ FastAPI cargado.")
@@ -51,9 +47,6 @@ if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     except Exception as e: print(f"⚠️ Error Twilio: {e}")
 else: print("⚠️ Faltan variables Twilio.")
 
-# =========================
-# Lógica de Mapeo y Helpers
-# =========================
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
@@ -268,8 +261,10 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
         elif filename.endswith(('.xls', '.xlsx')): df = pd.read_excel(file_like_object)
         if df is None: raise ValueError("No se pudo leer archivo con pandas.")
         
+        # Paso 1: Limpiar los encabezados del Excel
         df.columns = [re.sub(r'\s+', '_', re.sub(r'[^\w\s]', '', col)).lower() for col in df.columns]
 
+        # Paso 2: Validación de columna telefónica
         if 'phone_number' not in df.columns:
             phone_col_candidates = ['telefono', 'teléfono', 'numero', 'número', 'phone']
             for col in df.columns:
@@ -292,6 +287,7 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             for key, value in row_dict.items():
                 if key != 'phone_number':
                     # --- LÓGICA DE NORMALIZACIÓN FINAL: MINÚSCULAS ---
+                    # Esta lógica ahora coincide con el Agente (name, last_name)
                     clean_key = key.replace('_', '') 
                     
                     if clean_key == 'name':
@@ -319,3 +315,7 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
     )
     if not result["ok"]: raise HTTPException(500, result["error"])
     return JSONResponse({"ok": True, "data": result["data"]})
+
+# =================================================================
+# === FIN: LÓGICA DEL PANEL AGENTES ===============================
+# =================================================================
