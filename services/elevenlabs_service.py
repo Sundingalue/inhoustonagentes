@@ -3,6 +3,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import requests
+from urllib.parse import urlparse, parse_qs
 
 # === Config básica ===
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
@@ -107,31 +108,33 @@ def _normalize_metrics(payload: Any) -> Dict[str, Any]:
         "duration_secs": _safe_float(dur_s),
     }
 
+def _extract_conversation_items(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], list):
+        return payload["data"]
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("conversations"), list):
+        return payload["conversations"]
+    return []
+
 def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
     """
-    Suma conversaciones a partir de GET /v1/convai/conversations (fallback oficial).
-    Busca claves frecuentes: credits/credits_consumed, duration_secs/call_duration_seconds,
-    o calcula a partir de timestamps.
+    Suma conversaciones.
+    Busca claves frecuentes: credits/credits_consumed/usage_credits/cost_credits,
+    duration_secs/call_duration_seconds/duration_seconds o calcula por timestamps.
     """
     calls = 0; credits = 0.0; dur_s = 0.0
-    if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], list):
-        items = payload["data"]
-    elif isinstance(payload, list):
-        items = payload
-    else:
-        items = payload.get("conversations", []) if isinstance(payload, dict) else []
+    items = _extract_conversation_items(payload)
 
     for c in items:
         if not isinstance(c, dict): continue
         calls += 1
-        # créditos
-        cr = (c.get("credits"), c.get("credits_consumed"), c.get("usage_credits"), c.get("cost_credits"))
-        credits += next((_safe_float(v) for v in cr if v is not None), 0.0)
-        # duración
-        dur = (c.get("duration_secs"), c.get("call_duration_seconds"), c.get("duration_seconds"))
-        dsec = next((_safe_float(v) for v in dur if v is not None), None)
+        cr_candidates = (c.get("credits"), c.get("credits_consumed"), c.get("usage_credits"), c.get("cost_credits"))
+        credits += next((_safe_float(v) for v in cr_candidates if v is not None), 0.0)
+
+        dur_candidates = (c.get("duration_secs"), c.get("call_duration_seconds"), c.get("duration_seconds"))
+        dsec = next((_safe_float(v) for v in dur_candidates if v is not None), None)
         if dsec is None:
-            # calcular por timestamps si existen
             start_ts = c.get("call_start_unix") or c.get("start_unix")
             end_ts   = c.get("call_end_unix")   or c.get("end_unix")
             if start_ts and end_ts:
@@ -139,9 +142,10 @@ def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
             else:
                 dsec = 0.0
         dur_s += dsec
+
     return {"calls": calls, "credits": credits, "duration_secs": dur_s}
 
-# ---------- Métricas con fallback ----------
+# ---------- Métricas con fallback y paginación ----------
 def _try_metrics_variant(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
                          params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Dict[str, Any], str, int]:
     status, data, err, meta = _http(method, url, json_body=json_body, params=params)
@@ -153,11 +157,92 @@ def _try_metrics_variant(method: str, url: str, json_body: Optional[Dict[str, An
         return True, {"ok": True, "data": norm}, dbg, status
     return False, {"error": f"ElevenLabs error {status}: {str(data)[:200]}"}, dbg, status
 
+def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
+    """
+    Recorre todas las páginas de /v1/convai/conversations sumando métricas.
+    Intenta varios esquemas de paginación:
+      - 'next' como URL completa
+      - 'next_page_token' / 'nextToken' -> page_token/next_page_token
+      - fallback por 'offset' cuando length == limit
+    Limita a 50 páginas para evitar loops.
+    """
+    base_url = f"{BASE_URL}/v1/convai/conversations"
+    limit = 200  # subir un poco el tope por página
+    params: Dict[str, Any] = {
+        "agent_id": agent_id,
+        "call_start_after_unix":  start_unix_ts,
+        "call_start_before_unix": end_unix_ts,
+        "start_unix": start_unix_ts,
+        "end_unix":   end_unix_ts,
+        "limit": limit,
+    }
+
+    total_calls = 0; total_credits = 0.0; total_secs = 0.0
+    url = base_url
+    pages = 0
+
+    while pages < 50:
+        status, data, err, meta = _http("GET", url, params=params)
+        dbg = f"[metrics-fallback] GET {meta.get('url')} -> status={status} err={err}"
+        print(dbg)
+        if err:
+            break
+        if not (200 <= status < 300):
+            break
+
+        # sumar esta página
+        norm = _normalize_conversations_list(data)
+        total_calls   += norm["calls"]
+        total_credits += norm["credits"]
+        total_secs    += norm["duration_secs"]
+        pages += 1
+
+        # detectar siguiente página
+        next_url = None
+        next_token = None
+
+        if isinstance(data, dict):
+            # 1) next como URL
+            if isinstance(data.get("next"), str) and data["next"]:
+                next_url = data["next"]
+
+            # 2) next_page_token / nextToken
+            next_token = data.get("next_page_token") or data.get("nextToken")
+
+        # 3) si no hay next explícito, usar offset cuando llenamos la página
+        page_items = _extract_conversation_items(data)
+        filled_page = len(page_items) >= limit
+
+        if next_url:
+            # si es absoluta, úsala tal cual
+            url = next_url
+            params = None  # la URL ya trae sus query params
+            continue
+        elif next_token:
+            url = base_url
+            if params is None: params = {}
+            # probar nombres de parámetro comunes
+            params.update({
+                "page_token": next_token,
+                "next_page_token": next_token
+            })
+            continue
+        elif filled_page:
+            # fallback por offset
+            url = base_url
+            if params is None: params = {}
+            params["offset"] = _safe_int(params.get("offset", 0)) + limit
+            continue
+        else:
+            # no hay más páginas
+            break
+
+    return {"calls": total_calls, "credits": total_credits, "duration_secs": total_secs, "pages": pages}
+
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    1) Intenta el endpoint legacy (si existe en tu cuenta).
-    2) Si responde 404, usa Fallback: GET /v1/convai/conversations con filtros de fecha y suma.
-       (En abril/2025 añadieron filtros de historial en List Conversations).  # ver changelog
+    1) Intenta endpoint legacy /v1/convai/analytics/agent (si existe).
+    2) Si 404, usa Fallback: /v1/convai/conversations con paginación y filtros.
     """
     base = f"{BASE_URL}/v1/convai/analytics/agent"
     variants = [
@@ -170,60 +255,24 @@ def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: i
     delay = 1.0
     last_status = None
     last_error = "Unknown error"
-    debug_lines: List[str] = []
 
     for attempt in range(1, MAX_RETRIES + 1):
         for (method, url, body, params) in variants:
             ok, res, dbg, status = _try_metrics_variant(method, url, json_body=body, params=params)
             print(dbg)
-            debug_lines.append(dbg)
             last_status = status
             if ok:
                 return res
             last_error = res.get("error", last_error)
 
-        # si 404 repetido -> pasar a conversations fallback de inmediato
         if last_status == 404:
             break
         if attempt < MAX_RETRIES:
             time.sleep(delay); delay *= RETRY_BACKOFF
 
-    # --- Fallback oficial: List Conversations + filtros de fecha ---
-    # Nota: En el changelog mencionan filtros de historial por fecha en List Conversations.
-    # Usamos parámetros comunes; si tu cuenta usa nombres distintos, ElevenLabs igualmente
-    # ignora los desconocidos y devuelve 200 con todo el rango.
-    conv_url = f"{BASE_URL}/v1/convai/conversations"
-    conv_params = {
-        "agent_id": agent_id,
-        # nombres de filtros más probables (after/before)
-        "call_start_after_unix":  start_unix_ts,
-        "call_start_before_unix": end_unix_ts,
-        # algunos tenants usan start/end_unix o created_*; mandamos todos inofensivamente
-        "start_unix": start_unix_ts,
-        "end_unix":   end_unix_ts,
-        "limit": 1000,  # por si hay muchas (ajusta si tu cuenta pagina distinto)
-    }
-
-    delay = 1.0
-    for attempt in range(1, MAX_RETRIES + 1):
-        status, data, err, meta = _http("GET", conv_url, params=conv_params)
-        dbg = f"[metrics-fallback] GET {meta.get('url')} -> status={status} err={err}"
-        print(dbg)
-        debug_lines.append(dbg)
-        if err:
-            if attempt >= MAX_RETRIES:
-                return {"ok": False, "error": f"HTTP error: {err}", "debug": debug_lines[-6:]}
-            time.sleep(delay); delay *= RETRY_BACKOFF; continue
-        if 200 <= status < 300:
-            norm = _normalize_conversations_list(data)
-            return {"ok": True, "data": norm}
-        if _retryable(status):
-            if attempt >= MAX_RETRIES:
-                return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}", "debug": debug_lines[-6:]}
-            time.sleep(delay); delay *= RETRY_BACKOFF; continue
-        return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}", "debug": debug_lines[-6:]}
-
-    return {"ok": False, "error": last_error, "debug": debug_lines[-6:]}
+    # --- Fallback paginado ---
+    tot = _paginate_conversations(agent_id, start_unix_ts, end_unix_ts)
+    return {"ok": True, "data": {"calls": tot["calls"], "credits": tot["credits"], "duration_secs": tot["duration_secs"]}}
 
 # ---------- OUTBOUND (LOTE) (sin cambios) ----------
 def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
