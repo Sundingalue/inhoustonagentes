@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import time
 import io
 import csv
-import pandas as pd # Importar Pandas
+import pandas as pd 
 
 # Importar las funciones del servicio
 from services.elevenlabs_service import (
@@ -27,33 +27,23 @@ from services.elevenlabs_service import (
 )
 
 # =========================
-# Configuración del Directorio
+# Configuración y Carga
 # =========================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'agents')
-BOT_CONFIG_DIR = os.path.abspath(BOT_CONFIG_DIR)
-
-# =========================
-# Cargar .env
-# =========================
+BOT_CONFIG_DIR = os.path.join(SCRIPT_DIR, '..', 'agents'); BOT_CONFIG_DIR = os.path.abspath(BOT_CONFIG_DIR)
 SECRET_ENV_PATH = "/etc/secrets/.env"
 if os.path.exists(SECRET_ENV_PATH): load_dotenv(SECRET_ENV_PATH); print(f"✅ .env cargado desde {SECRET_ENV_PATH}")
 else: load_dotenv(); print("⚠️ Usando .env local")
 
 # =========================
-# App y CORS
+# App y Handlers Base
 # =========================
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 print("✅ FastAPI cargado.")
-
-# =========================
-# Config HMAC y Twilio
-# =========================
 HMAC_SECRET = (os.getenv("ELEVENLABS_HMAC_SECRET") or "").strip()
 SKIP_HMAC = (os.getenv("ELEVENLABS_SKIP_HMAC") or "false").strip().lower() == "true"
 if not HMAC_SECRET and not SKIP_HMAC: raise RuntimeError("❌ Falta ELEVENLABS_HMAC_SECRET")
-
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID'); TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN'); TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 twilio_client = None; twilio_configurado = False
 if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
@@ -61,9 +51,9 @@ if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     except Exception as e: print(f"⚠️ Error Twilio: {e}")
 else: print("⚠️ Faltan variables Twilio.")
 
-# =========================
-# Lógica de Mapeo y Helpers
-# =========================
+# (Funciones de Mapeo, Webhook y Agendamiento omitidas por brevedad, asumiendo que están correctas)
+# (Incluir aquí el código completo de esas funciones)
+# ...
 AGENT_ID_TO_FILENAME_CACHE: Dict[str, str] = {}
 def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
     if agent_id in AGENT_ID_TO_FILENAME_CACHE: return AGENT_ID_TO_FILENAME_CACHE[agent_id]
@@ -123,9 +113,6 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception: pass
     return {"agent_id": agent_id, "transcript_text": transcript_text, "caller": caller, "called": called, "timestamp": root.get("timestamp") or data.get("timestamp"), "raw": data}
 
-# =========================
-# Webhook y Endpoints Agendamiento
-# =========================
 @app.post("/api/agent-event")
 async def handle_agent_event(request: Request, elevenlabs_signature: str = Header(default=None, alias="elevenlabs-signature")):
     sig_header = None 
@@ -303,17 +290,20 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
             # Preparar objeto desanidado (todas las variables al mismo nivel)
             recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
-                # Reemplazamos los guiones bajos por nada para que coincidan con {{name}}
-                clean_key = key.replace('_', '') 
-                
-                # Forzamos los nombres que esperamos: 'name' y 'last_name'
-                if clean_key == 'name':
-                    recipient_info['name'] = str(value)
-                elif clean_key == 'lastname':
-                    recipient_info['last_name'] = str(value)
-                elif key != 'phone_number':
-                    # Otras columnas van con su clave original limpiada
-                    recipient_info[clean_key] = str(value)
+                if key != 'phone_number':
+                    # --- CORRECCIÓN FINAL DE VARIABLES ---
+                    # Normalizar nombres para coincidir con las variables más comunes
+                    clean_key = key.replace('_', '') 
+                    
+                    if clean_key == 'name':
+                        # Forzar la clave a 'Name' (mayúscula) para compatibilidad con el Agente de ElevenLabs
+                        recipient_info['Name'] = str(value) 
+                    elif clean_key == 'lastname':
+                        # Forzar la clave a 'Last_Name' (o Lastname) para compatibilidad
+                        recipient_info['Last_Name'] = str(value) 
+                    elif key != 'phone_number':
+                        # Otras columnas van con su clave original limpia
+                        recipient_info[clean_key] = str(value)
             
             recipients.append(recipient_info)
 
