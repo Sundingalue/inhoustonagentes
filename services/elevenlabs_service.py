@@ -1,4 +1,3 @@
-# ... (Todo el código anterior SIN CAMBIOS hasta la función get_agent_consumption_data) ...
 import os
 import requests
 import json 
@@ -14,8 +13,7 @@ except ValueError:
     FALLBACK_CREDITS_PER_SEC = DEFAULT_CREDITS_PER_SEC_FALLBACK
 print(f"[ElevenLabs] Usando tasa fallback de créditos/seg: {FALLBACK_CREDITS_PER_SEC}")
 
-# --- Funciones existentes (start_conversation_with_agent, _eleven_request, etc.) ---
-# ... (Incluir aquí el código completo de esas funciones sin cambios) ...
+# --- Funciones existentes (sin cambios) ---
 def start_conversation_with_agent(agent_id, input_text=None):
     url = f"https://api.elevenlabs.io/v1/agents/{agent_id}/conversation"
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
@@ -29,6 +27,7 @@ def start_conversation_with_agent(agent_id, input_text=None):
         return {"error": f"Error al iniciar conversación"}
 
 def _eleven_request(method, endpoint, payload=None, params=None):
+    # ... (código del helper _eleven_request sin cambios) ...
     if not ELEVENLABS_API_KEY:
         print("[ElevenLabs] Error: API Key no configurada.")
         return {"ok": False, "error": "API Key no configurada"}
@@ -56,6 +55,7 @@ def _eleven_request(method, endpoint, payload=None, params=None):
         print(f"[ElevenLabs] Error Conexión: {req_err}")
         return {"ok": False, "error": f"Error conexión: {req_err}"}
 
+
 def get_eleven_agents():
     print("[ElevenLabs] Obteniendo agentes...")
     return _eleven_request("GET", "/convai/agents")
@@ -64,12 +64,19 @@ def get_eleven_phone_numbers():
     print("[ElevenLabs] Obteniendo números...")
     return _eleven_request("GET", "/convai/phone-numbers")
 
-
 # ===================================================================
-# === FUNCIÓN CON PRUEBA: 'start_unix' para fecha inicio ===========
+# === FUNCIÓN CON PARÁMETROS PHP Y LOG DE TIMESTAMPS ==============
 # ===================================================================
-def get_agent_consumption_data(agent_id, start_unix, end_unix):
+def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts): # Cambiamos nombres aquí para claridad
+    """
+    Obtiene consumo usando /conversations con paginación (cursor),
+    parámetros de fecha estilo PHP y fallback de créditos.
+    """
     print(f"[ElevenLabs] Obteniendo TODAS las conversaciones para Agente ID: {agent_id}...")
+    # +++ Loggear los timestamps recibidos +++
+    print(f"DEBUG: Timestamps Unix calculados: start={start_unix_ts}, end={end_unix_ts}")
+    # ++++++++++++++++++++++++++++++++++++++++
+    
     endpoint = "/convai/conversations"
     
     total_calls = 0
@@ -89,10 +96,11 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
             "page_size": 30 
         }
         
+        # Enviar fechas solo si NO hay cursor (primera página)
+        # *** Usando los nombres del PHP ***
         if not next_cursor:
-            # *** PRUEBA: Usar 'start_unix' aquí, pero mantener 'call_start_before_unix' ***
-            params["start_unix"] = int(start_unix)              # <--- PRUEBA
-            params["call_start_before_unix"] = int(end_unix) # <--- MANTENER (Funciona)
+            params["call_start_after_unix"] = int(start_unix_ts)  # <--- REVERTIDO A PHP
+            params["call_start_before_unix"] = int(end_unix_ts) # <--- MANTENER (Funciona)
             print("DEBUG: Enviando fechas (primera página)")
         else:
             params["cursor"] = next_cursor 
@@ -113,7 +121,7 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
             else: print(f"[ElevenLabs] Página {page_num} vacía. Fin.")
             break 
 
-        # Imprimir JSON si aún no lo tenemos
+        # Imprimir JSON (solo la primera vez)
         if page_num == 1 and conversations_page:
              try:
                  print("DEBUG: ================== PRIMERA CONVERSACIÓN (PAG 1) ==================")
@@ -122,6 +130,7 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
              except Exception as e:
                  print(f"DEBUG: Error al imprimir el objeto de conversación: {e}")
 
+        # Sumar totales
         for convo in conversations_page:
             if isinstance(convo, dict):
                 call_status = convo.get('call_successful', 'success') 
@@ -133,13 +142,12 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
                 found_explicit_credits = False
                 for field_name in credit_field_candidates:
                     if field_name in convo and convo[field_name] is not None:
-                        try:
-                            value = float(convo[field_name])
-                            if value >= 0: 
-                                credits_found = value
-                                found_explicit_credits = True 
-                                break 
+                        try: value = float(convo[field_name])
                         except (ValueError, TypeError): continue 
+                        if value >= 0: 
+                            credits_found = value
+                            found_explicit_credits = True 
+                            break 
                 if not found_explicit_credits and secs > 0:
                     calculated_credits = secs * FALLBACK_CREDITS_PER_SEC
                     total_credits += calculated_credits
@@ -163,7 +171,6 @@ def get_agent_consumption_data(agent_id, start_unix, end_unix):
     return {"ok": True, "data": normalized_data}
 
 # --- Función start_batch_call (sin cambios) ---
-# ... (Incluir el código anterior) ...
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
     print(f"[ElevenLabs] Iniciando lote: {call_name} (Agente: {agent_id})")
     endpoint = "/convai/batch-calling/submit"
