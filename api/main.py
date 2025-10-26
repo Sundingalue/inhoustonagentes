@@ -296,7 +296,12 @@ async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch
     except Exception as e: print(f"💥 Error procesando archivo: {e}"); traceback.print_exc(); raise HTTPException(400, f"Error procesando archivo: {e}")
     if not recipients: raise HTTPException(400, "Archivo no contiene destinatarios válidos")
     print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} ({len(recipients)} dest.)")
-    result = start_batch_call(batch_name=batch_name, agent_id=agent_id, phone_number_id=phone_number_id, recipients=recipients)
+    result = start_batch_call(
+    call_name=batch_name,
+    agent_id=agent_id,
+    phone_number_id=phone_number_id,
+    recipients_json=recipients # <-- CORRECTED ARGUMENT NAME
+)
     if not result["ok"]: raise HTTPException(500, result["error"])
     return JSONResponse({"ok": True, "data": result["data"]})
 
