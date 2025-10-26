@@ -154,7 +154,7 @@ from services.calendar_checker import check_availability
 from services.calendar_service import book_appointment
 
 # ==========================================================
-# === CLASE CitaPayload CORREGIDA (Indentación) ============
+# === CLASE CitaPayload CON CORRECCIÓN FINAL (Indentación) ===
 # ==========================================================
 class CitaPayload(dict):
     """
@@ -180,6 +180,7 @@ async def agendar_cita_endpoint(request: Request):
         except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
         except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
         cn=payload['cliente_nombre']; fs=payload['fecha']; hs=payload['hora']
+        # Corrección menor: asegurar que hs se usa en el log
         print(f"🔄 Verificando disponibilidad {cn} {fs} {hs}...")
         if not check_availability(fs, hs): return JSONResponse(status_code=409, content={"status":"failure","message":f"No disponible: {fs} {hs}."})
         print("✅ Disponible. Agendando..."); book_result = book_appointment(nombre=cn, apellido="N/A", telefono="N/A", email="test@web.com", fechaCita=fs, horaCita=hs)
@@ -194,8 +195,13 @@ async def agendar_cita_endpoint(request: Request):
                     print(f"⚠️ Falló envío SMS (CITA AGENDADA). Error: {sms_error}")
             return JSONResponse(status_code=200, content={"status":"success", "message":msg})
         else: return JSONResponse(status_code=500, content={"status":"failure", "message":"Fallo al agendar.", "details": book_result.get('message','?')})
-    except HTTPException as h: return JSONResponse(status_code=h.status_code, content={"error":h.detail})
-    except Exception as e: print(f"💥 Error /agendar_cita: {e}"); traceback.print_exc(); return JSONResponse(status_code=500, content={"error":"internal_error", "detail":str(e)})
+    # Asegurar que los except estén al mismo nivel del try principal
+    except HTTPException as h:
+        return JSONResponse(status_code=h.status_code, content={"error": h.detail})
+    except Exception as e:
+        print(f"💥 Error /agendar_cita: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
 
 # =================================================================
 # === INICIO: LÓGICA DEL PANEL AGENTES ============================

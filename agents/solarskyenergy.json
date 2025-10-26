@@ -13,7 +13,8 @@
     "maps_url": "https://maps.app.goo.gl/saGKjQADLAjbHuyZ9"
   },
   "invoice": true,
-  "elevenlabs_agent_id": "agent_8301k6n79bmvekcbx7vqby7asrze",
+  "elevenlabs_agent_id": "agent_8301k6n79bmvekcbx7vqby7asrze", 
+  "eleven_phone_number_id": "phnum_2401k893e1k5eckrng7qqh185ran", 
   "sheet_id": "1mdnuCn3NXC84dGrD0ellxubcJ02hg7huInq9aKltPvk",
 
   "workflow": [
