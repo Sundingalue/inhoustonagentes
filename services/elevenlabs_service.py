@@ -1,7 +1,7 @@
 import os
 import requests
 import json
-import time # Necesario para time.time()
+import time
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVEN_API_BASE = "https://api.elevenlabs.io/v1"
@@ -55,7 +55,7 @@ def get_eleven_phone_numbers():
     return _eleven_request("GET", "/convai/phone-numbers")
 
 def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
-    # ... (Código completo de esta función SIN CAMBIOS) ...
+    """Obtiene datos de consumo. (Mantenemos la lógica de filtrado local)."""
     print(f"[EL] Getting conversations BEFORE {end_unix_ts} for Agent ID: {agent_id}...")
     endpoint = "/convai/conversations"
     all_conversations = []
@@ -99,36 +99,32 @@ def get_agent_consumption_data(agent_id, start_unix_ts, end_unix_ts):
 
 
 # ===================================================================
-# === FUNCIÓN CORREGIDA: ENVÍO DE LOTES (Fuerza Inicio Inmediato) ===
+# === FUNCIÓN CORREGIDA: VUELVE A COMPORTAMIENTO ORIGINAL DE LOTES ==
 # ===================================================================
 def start_batch_call(call_name, agent_id, phone_number_id, recipients_json):
     """
-    Inicia una llamada por lotes (a múltiples destinatarios) y fuerza la programación
-    al instante actual para evitar el estado 'Programado' por defecto.
+    Inicia una llamada por lotes (a múltiples destinatarios) sin forzar el inicio
+    inmediato (el comportamiento original de ElevenLabs).
     """
     
-    print(f"[EL] Initiating PRIORITY BATCH CAMPAIGN: {call_name} for Agent: {agent_id} with {len(recipients_json)} recipients.")
+    print(f"[EL] Initiating DEFAULT BATCH SUBMISSION: {call_name} for Agent: {agent_id} with {len(recipients_json)} recipients.")
     
     endpoint = "/convai/batch-calling/submit"
-    
-    # *** LÍNEA CLAVE: Programa el lote para que inicie AHORA MISMO ***
-    scheduled_timestamp = int(time.time()) 
     
     payload = {
         "call_name": call_name,
         "agent_id": agent_id,
         "agent_phone_number_id": phone_number_id,
-        "recipients": recipients_json,
-        "scheduled_time_unix": scheduled_timestamp # <--- FUERZA INICIO INMEDIATO
+        "recipients": recipients_json
+        # !!! QUITAMOS 'scheduled_time_unix' !!!
     }
     
     # Hacemos la llamada POST al endpoint de LOTES
     result = _eleven_request("POST", endpoint, payload=payload)
     
     if result.get("ok"):
-        print(f"[EL] Batch submission successful. Status: PRIORITY QUEUE.")
-        # La API devuelve el batch_id.
-        return {"ok": True, "data": {"status": "Lote enviado con prioridad de inicio inmediato", "id": result['data'].get('batch_id')}}
+        print(f"[EL] Batch submission successful. Status: ElevenLabs Default Queue.")
+        return {"ok": True, "data": {"status": "Lote enviado a cola por defecto", "id": result['data'].get('batch_id')}}
     
     return result
 # ===================================================================
