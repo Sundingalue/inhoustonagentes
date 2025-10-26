@@ -267,15 +267,8 @@ async def get_agent_data(request: AgentDataRequest, agent: AgentData = Depends(g
     final = {"agent_name":name,"phone_number":ph,"calls":cd["calls"],"credits_consumed":cd["credits"],"total_cost_usd":cost}
     return JSONResponse({"ok":True, "data":final})
 
-# ==========================================================
-# === MODIFICACIÓN PARA VARIABLES DINÁMICAS (CORREGIDO) ===
-# ==========================================================
 @app.post("/agent/start-batch-call")
-async def handle_batch_call(
-    agent: AgentData = Depends(get_current_agent),
-    batch_name: str = Form(...),
-    csv_file: UploadFile = File(...)
-):
+async def handle_batch_call(agent: AgentData = Depends(get_current_agent), batch_name: str = Form(...), csv_file: UploadFile = File(...)):
     bot_config = agent.config; filename = csv_file.filename.lower()
     allowed_extensions = ('.csv', '.xls', '.xlsx')
     if not filename.endswith(allowed_extensions): raise HTTPException(400, f"Formato no soportado. Usar {', '.join(allowed_extensions)}")
@@ -307,25 +300,28 @@ async def handle_batch_call(
             phone = str(row_dict.get('phone_number', '')).strip()
             if not phone: continue
 
-            # --- CORRECCIÓN CLAVE: DES-ANIDAR VARIABLES ---
-            # El objeto del destinatario es la fila completa, incluyendo nombre y apellido
-            recipient_info = {
-                'phone_number': phone
-            }
-            # Añadir todas las demás columnas a nivel superior
+            # Preparar objeto desanidado (todas las variables al mismo nivel)
+            recipient_info = {'phone_number': phone}
             for key, value in row_dict.items():
-                if key != 'phone_number':
-                    recipient_info[str(key)] = str(value)
+                # Reemplazamos los guiones bajos por nada para que coincidan con {{name}}
+                clean_key = key.replace('_', '') 
+                
+                # Forzamos los nombres que esperamos: 'name' y 'last_name'
+                if clean_key == 'name':
+                    recipient_info['name'] = str(value)
+                elif clean_key == 'lastname':
+                    recipient_info['last_name'] = str(value)
+                elif key != 'phone_number':
+                    # Otras columnas van con su clave original limpiada
+                    recipient_info[clean_key] = str(value)
             
             recipients.append(recipient_info)
-            # --- FIN CORRECCIÓN CLAVE ---
-
 
     except HTTPException as http_ex: raise http_ex
     except Exception as e: print(f"💥 Error procesando archivo: {e}"); traceback.print_exc(); raise HTTPException(400, f"Error al procesar el archivo: {e}")
     if not recipients: raise HTTPException(400, "Archivo no contiene destinatarios válidos")
     
-    # *** Log para verificar la estructura que se envía ***
+    # Debug para verificar la estructura final
     print(f"DEBUG: Enviando muestra de destinatario a la API: {recipients[0] if recipients else 'None'}")
     
     print(f"Iniciando lote '{batch_name}' para {agent.bot_slug} ({len(recipients)} dest.)")
@@ -333,7 +329,7 @@ async def handle_batch_call(
         call_name=batch_name,
         agent_id=agent_id,
         phone_number_id=phone_number_id,
-        recipients_json=recipients # Ahora recipients es la lista de objetos des-anidados
+        recipients_json=recipients
     )
     if not result["ok"]: raise HTTPException(500, result["error"])
     return JSONResponse({"ok": True, "data": result["data"]})
