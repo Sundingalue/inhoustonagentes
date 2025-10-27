@@ -11,6 +11,9 @@ DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
 RETRY_BACKOFF   = 1.5
 
+# Fallback opcional para estimar créditos si el API no los devuelve
+CREDITS_PER_SEC_FALLBACK = float(os.getenv("ELEVENLABS_CREDITS_PER_SEC", "0").strip() or 0)
+
 # ---------- Helpers HTTP ----------
 def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if not XI_API_KEY:
@@ -74,11 +77,10 @@ def _sum_int(x: Any) -> int:
             return 0
 
 def _extract_credits(row: Dict[str, Any]) -> float:
-    # nombres comunes donde ElevenLabs entrega créditos
+    # nombres comunes donde ElevenLabs entrega créditos (si tuvieras otro tenant que los expone)
     for k in ("credits", "credits_consumed", "total_credits", "usage_credits"):
         if k in row:
             return _sum_float(row.get(k))
-    # a veces vienen anidados
     usage = row.get("usage") or {}
     if isinstance(usage, dict):
         for k in ("credits", "credits_consumed"):
@@ -87,7 +89,8 @@ def _extract_credits(row: Dict[str, Any]) -> float:
     return 0.0
 
 def _extract_duration_secs(row: Dict[str, Any]) -> float:
-    for k in ("duration_secs", "duration_seconds", "total_duration_secs", "seconds"):
+    # Tu tenant devuelve 'call_duration_secs' (ver logs)
+    for k in ("call_duration_secs", "duration_secs", "duration_seconds", "total_duration_secs", "seconds"):
         if k in row:
             return _sum_float(row.get(k))
     # a veces duration viene en milisegundos
@@ -113,8 +116,9 @@ def _conversations_url(agent_id: str, start_unix_ts: int, end_unix_ts: int, limi
 
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Suma llamadas, créditos y duración consultando /v1/convai/conversations
-    (endpoint estable para tu tenant). Pagina con `cursor` hasta terminar.
+    Suma llamadas y duración desde /v1/convai/conversations con paginación por cursor.
+    Si el API no trae créditos, opcionalmente los estima a partir de la duración usando
+    ELEVENLABS_CREDITS_PER_SEC.
     """
     total_calls = 0
     total_credits = 0.0
@@ -138,7 +142,6 @@ def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: i
         if not (200 <= status < 300):
             return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}"}
 
-        # Estructura esperada: { conversations: [...], next_cursor: "..." }
         conversations = []
         next_cursor = None
 
@@ -151,21 +154,21 @@ def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: i
         if not isinstance(conversations, list):
             conversations = []
 
-        # Agregar
         for row in conversations:
             if not isinstance(row, dict):
                 continue
             total_calls += 1
+            # créditos si vienen (no es tu caso actual)
             total_credits += _extract_credits(row)
+            # duración real en segundos (tu caso: call_duration_secs)
             total_duration_secs += _extract_duration_secs(row)
 
-        # Log de muestra: solo en la primera página
         if page == 0 and conversations:
             try:
                 sample = conversations[0]
                 print("[metrics] sample conversation:", {
-                    "has_credits": any(k in sample for k in ("credits", "credits_consumed")),
-                    "has_duration": any(k in sample for k in ("duration_secs", "duration_seconds", "duration_ms")),
+                    "has_credits": any(k in sample for k in ("credits", "credits_consumed", "usage_credits")),
+                    "has_duration": any(k in sample for k in ("call_duration_secs", "duration_secs", "duration_ms")),
                     "keys": list(sample.keys())[:15]
                 })
             except Exception:
@@ -174,10 +177,13 @@ def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: i
         page += 1
         if next_cursor:
             cursor = next_cursor
-            # pequeño respiro por si hay rate limiting
             time.sleep(0.05)
             continue
         break
+
+    # Si el API no aportó créditos pero quieres mostrarlos/US$, se pueden estimar
+    if total_credits == 0.0 and CREDITS_PER_SEC_FALLBACK > 0:
+        total_credits = round(total_duration_secs * CREDITS_PER_SEC_FALLBACK, 6)
 
     return {
         "ok": True,
@@ -199,7 +205,6 @@ def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
         sv = str(v).strip()
         if not sv:
             continue
-        # mantener tal cual (name, last_name, etc.)
         dyn[k] = sv
     return dyn
 
