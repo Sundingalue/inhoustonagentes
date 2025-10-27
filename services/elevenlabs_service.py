@@ -4,17 +4,22 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
-# === Config básica ===
+# =========================
+# Config básica
+# =========================
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
 BASE_URL   = "https://api.elevenlabs.io"
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
 RETRY_BACKOFF   = 1.5
 
-# Fallback opcional para estimar créditos si el API no los devuelve
-CREDITS_PER_SEC_FALLBACK = float(os.getenv("ELEVENLABS_CREDITS_PER_SEC", "0").strip() or 0)
+# Factor de créditos por segundo (obligatorio si conversations no trae créditos)
+# Ejemplo (de tus números): 286 créditos / 35 s = 8.1714286
+CREDITS_PER_SEC = float(os.getenv("ELEVENLABS_CREDITS_PER_SEC", "0") or 0)
 
-# ---------- Helpers HTTP ----------
+# =========================
+# Helpers HTTP
+# =========================
 def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if not XI_API_KEY:
         raise RuntimeError("XI_API_KEY / ELEVENLABS_API_KEY no está configurada.")
@@ -41,7 +46,9 @@ def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
 def _retryable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 
-# ---------- Admin: Agentes / Números ----------
+# =========================
+# Admin: Agentes / Números
+# =========================
 def get_eleven_agents() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/agents"
     status, data, err = _http("GET", url, None)
@@ -60,48 +67,23 @@ def get_eleven_phone_numbers() -> Dict[str, Any]:
         return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
-# ---------- MÉTRICAS (solo conversations, con paginación) ----------
-def _sum_float(x: Any) -> float:
-    try:
-        return float(x or 0.0)
-    except Exception:
-        return 0.0
-
-def _sum_int(x: Any) -> int:
-    try:
-        return int(x or 0)
-    except Exception:
-        try:
-            return int(float(x or 0))
-        except Exception:
-            return 0
-
-def _extract_credits(row: Dict[str, Any]) -> float:
-    # nombres comunes donde ElevenLabs entrega créditos (si tuvieras otro tenant que los expone)
-    for k in ("credits", "credits_consumed", "total_credits", "usage_credits"):
-        if k in row:
-            return _sum_float(row.get(k))
-    usage = row.get("usage") or {}
-    if isinstance(usage, dict):
-        for k in ("credits", "credits_consumed"):
-            if k in usage:
-                return _sum_float(usage.get(k))
-    return 0.0
-
-def _extract_duration_secs(row: Dict[str, Any]) -> float:
-    # Tu tenant devuelve 'call_duration_secs' (ver logs)
-    for k in ("call_duration_secs", "duration_secs", "duration_seconds", "total_duration_secs", "seconds"):
-        if k in row:
-            return _sum_float(row.get(k))
-    # a veces duration viene en milisegundos
-    for k in ("duration_ms", "durationMilliseconds"):
-        if k in row:
-            return _sum_float(row.get(k)) / 1000.0
-    return 0.0
-
-def _conversations_url(agent_id: str, start_unix_ts: int, end_unix_ts: int, limit: int = 200, cursor: Optional[str] = None) -> str:
-    base = (
-        f"{BASE_URL}/v1/convai/conversations"
+# ==========================================================
+# MÉTRICAS: sólo conversations (analytics/agent da 404)
+#   - Contamos llamadas por cantidad de conversaciones
+#   - Sumamos duración desde 'call_duration_secs'
+#   - Créditos:
+#       * Si la API trae un campo de créditos (raro), lo usamos
+#       * Si no, calculamos: créditos = duración_total_en_segundos * CREDITS_PER_SEC
+# ==========================================================
+def _conversations_page(
+    agent_id: str,
+    start_unix_ts: int,
+    end_unix_ts: int,
+    limit: int = 200,
+    cursor: Optional[str] = None
+) -> Dict[str, Any]:
+    base = f"{BASE_URL}/v1/convai/conversations"
+    params = (
         f"?agent_id={agent_id}"
         f"&call_start_after_unix={start_unix_ts}"
         f"&call_start_before_unix={end_unix_ts}"
@@ -110,93 +92,104 @@ def _conversations_url(agent_id: str, start_unix_ts: int, end_unix_ts: int, limi
         f"&limit={limit}"
     )
     if cursor:
-        from urllib.parse import quote
-        base += f"&cursor={quote(cursor, safe='')}"
-    return base
+        params += f"&cursor={cursor}"
+
+    url = base + params
+    status, data, err = _http("GET", url, None)
+    print(f"[metrics-conv] GET {url} -> status={status} err={err}")
+    if err:
+        return {"ok": False, "error": f"HTTP error: {err}"}
+    if not (200 <= status < 300):
+        return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}"}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "Respuesta inesperada en conversations."}
+    return {"ok": True, "data": data}
 
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Suma llamadas y duración desde /v1/convai/conversations con paginación por cursor.
-    Si el API no trae créditos, opcionalmente los estima a partir de la duración usando
-    ELEVENLABS_CREDITS_PER_SEC.
+    Agrega métricas a partir de /v1/convai/conversations, con paginación.
     """
     total_calls = 0
-    total_credits = 0.0
     total_duration_secs = 0.0
+    total_credits = 0.0
 
-    cursor: Optional[str] = None
-    page = 0
+    cursor = None
+    seen_keys_debugged = False  # log de una muestra de claves
 
     while True:
-        url = _conversations_url(agent_id, start_unix_ts, end_unix_ts, limit=200, cursor=cursor)
-        status, data, err = _http("GET", url, None)
-        print(f"[metrics] GET {url} -> status={status} err={err}")
+        page = _conversations_page(agent_id, start_unix_ts, end_unix_ts, limit=200, cursor=cursor)
+        if not page["ok"]:
+            return {"ok": False, "error": page["error"]}
 
-        if err:
-            return {"ok": False, "error": f"HTTP error: {err}"}
+        payload = page["data"]
+        items = payload.get("conversations") or payload.get("items") or []
+        if not isinstance(items, list):
+            items = []
 
-        if status == 429:
-            time.sleep(1.5)
-            continue
+        # Mostrar una muestra de claves (debug)
+        if not seen_keys_debugged and items:
+            sample = items[0]
+            keys = list(sample.keys())
+            print(f"[metrics] sample conversation keys: {keys}")
+            seen_keys_debugged = True
 
-        if not (200 <= status < 300):
-            return {"ok": False, "error": f"ElevenLabs error {status}: {str(data)[:200]}"}
-
-        conversations = []
-        next_cursor = None
-
-        if isinstance(data, dict):
-            conversations = data.get("conversations") or data.get("items") or []
-            next_cursor = data.get("next_cursor") or data.get("cursor") or None
-        elif isinstance(data, list):
-            conversations = data
-
-        if not isinstance(conversations, list):
-            conversations = []
-
-        for row in conversations:
-            if not isinstance(row, dict):
-                continue
-            total_calls += 1
-            # créditos si vienen (no es tu caso actual)
-            total_credits += _extract_credits(row)
-            # duración real en segundos (tu caso: call_duration_secs)
-            total_duration_secs += _extract_duration_secs(row)
-
-        if page == 0 and conversations:
+        for conv in items:
             try:
-                sample = conversations[0]
-                print("[metrics] sample conversation:", {
-                    "has_credits": any(k in sample for k in ("credits", "credits_consumed", "usage_credits")),
-                    "has_duration": any(k in sample for k in ("call_duration_secs", "duration_secs", "duration_ms")),
-                    "keys": list(sample.keys())[:15]
-                })
+                # Contamos llamada si existe un id
+                if conv.get("conversation_id") or conv.get("id"):
+                    total_calls += 1
+
+                # Duración
+                dur = conv.get("call_duration_secs") or conv.get("duration_secs") or conv.get("seconds") or 0
+                try:
+                    total_duration_secs += float(dur or 0)
+                except Exception:
+                    pass
+
+                # Créditos (si vinieran) — la mayoría de cuentas no lo traen
+                credits = conv.get("credits") or conv.get("total_credits")
+                if credits is not None:
+                    try:
+                        total_credits += float(credits)
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                continue
 
-        page += 1
-        if next_cursor:
-            cursor = next_cursor
-            time.sleep(0.05)
-            continue
-        break
+        cursor = payload.get("cursor") or payload.get("next_cursor")
+        if not cursor:
+            break
 
-    # Si el API no aportó créditos pero quieres mostrarlos/US$, se pueden estimar
-    if total_credits == 0.0 and CREDITS_PER_SEC_FALLBACK > 0:
-        total_credits = round(total_duration_secs * CREDITS_PER_SEC_FALLBACK, 6)
+    # Si la API no trajo créditos, calculamos por factor
+    if total_credits == 0.0:
+        if CREDITS_PER_SEC <= 0:
+            # Si no hay factor configurado, devolvemos métricas sin créditos (para no inventar)
+            print("[metrics] conversations no trae créditos y ELEVENLABS_CREDITS_PER_SEC no está definido (>0).")
+            return {
+                "ok": True,
+                "data": {
+                    "calls": total_calls,
+                    "credits": 0.0,
+                    "duration_secs": total_duration_secs
+                }
+            }
+        # Calculamos créditos por duración
+        total_credits = total_duration_secs * CREDITS_PER_SEC
 
     return {
         "ok": True,
         "data": {
             "calls": total_calls,
-            "credits": round(total_credits, 6),
-            "duration_secs": round(total_duration_secs, 3),
+            "credits": total_credits,
+            "duration_secs": total_duration_secs
         }
     }
 
-# ---------- OUTBOUND (LOTE) ----------
-def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
-    dyn: Dict[str, Any] = {}
+# =========================
+# Outbound (lotes)
+# =========================
+def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, str]:
+    dyn: Dict[str, str] = {}
     for k, v in recipient.items():
         if k == "phone_number":
             continue
@@ -256,7 +249,7 @@ def start_batch_call(call_name: str, agent_id: str, phone_number_id: str,
             failures.append({"phone_number":"","error":"Fila sin phone_number","status":0,"payload_sample":r})
             continue
 
-        dyn = _build_dynamic_variables(r)  # mantiene name, last_name, etc.
+        dyn = _build_dynamic_variables(r)  # conserva name, last_name, etc.
         ok, data, err, status = _post_outbound_call(agent_id, phone_number_id, to, dyn)
         if ok:
             sent += 1
