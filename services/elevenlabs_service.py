@@ -5,18 +5,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 # ===============================
-# Config básica
+# Config
 # ===============================
 XI_API_KEY = (os.getenv("XI_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or "").strip()
 BASE_URL   = "https://api.elevenlabs.io"
-
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
 RETRY_BACKOFF   = 1.5
 
-
 # ===============================
-# Helpers HTTP
+# HTTP helpers
 # ===============================
 def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if not XI_API_KEY:
@@ -30,154 +28,54 @@ def _auth_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers.update(extra)
     return headers
 
-
-def _http(
-    method: str,
-    url: str,
-    json_body: Optional[Dict[str, Any]] = None,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> Tuple[int, Any, Optional[str]]:
+def _http(method: str, url: str, json_body: Optional[Dict[str, Any]] = None,
+          timeout: int = DEFAULT_TIMEOUT) -> Tuple[int, Any, Optional[str]]:
     try:
-        resp = requests.request(
-            method=method,
-            url=url,
-            json=json_body,
-            headers=_auth_headers(),
-            timeout=timeout,
-        )
+        resp = requests.request(method=method, url=url, json=json_body,
+                                headers=_auth_headers(), timeout=timeout)
         ct = (resp.headers.get("Content-Type") or "").lower()
         data = resp.json() if "application/json" in ct else resp.text
         return resp.status_code, data, None
     except requests.RequestException as e:
         return 0, None, str(e)
 
-
 def _retryable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 
+def _to_float(x: Any, default: float = 0.0) -> float:
+    try: return float(x) if x is not None else default
+    except Exception: return default
+
+def _to_int(x: Any, default: int = 0) -> int:
+    try: return int(round(float(x))) if x is not None else default
+    except Exception: return default
 
 # ===============================
-# Admin: Agentes / Números
+# Admin (sin cambios)
 # ===============================
 def get_eleven_agents() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/agents"
     status, data, err = _http("GET", url, None)
-    if err:
-        return {"ok": False, "error": f"HTTP error: {err}"}
-    if 200 <= status < 300:
-        return {"ok": True, "data": data}
+    if err: return {"ok": False, "error": f"HTTP error: {err}"}
+    if 200 <= status < 300: return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
-
 
 def get_eleven_phone_numbers() -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/convai/twilio/phone-numbers"
     status, data, err = _http("GET", url, None)
-    if err:
-        return {"ok": False, "error": f"HTTP error: {err}"}
-    if 200 <= status < 300:
-        return {"ok": True, "data": data}
+    if err: return {"ok": False, "error": f"HTTP error: {err}"}
+    if 200 <= status < 300: return {"ok": True, "data": data}
     return {"ok": False, "error": f"ElevenLabs error {status}: {data}"}
 
-
 # ===============================
-# Métricas (robusto con fallback)
+# MÉTRICAS — Solo conversations (robusto y con logs)
 # ===============================
-
-def _to_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x) if x is not None else default
-    except Exception:
-        return default
-
-
-def _to_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(round(float(x))) if x is not None else default
-    except Exception:
-        return default
-
-
-def _normalize_metrics(payload: Any) -> Dict[str, Any]:
+def _fallback_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Normaliza múltiples posibles formatos a:
-      { calls: int, credits: float, duration_secs: float }
+    Agrega llamadas, créditos y duración leyendo todas las conversaciones del rango.
+    Pagina con cursor hasta agotar resultados. LOGS incluidos para depurar.
     """
-    if not isinstance(payload, dict):
-        return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
-
-    d = payload.get("data", payload)
-
-    # Intentos de nombres comunes
-    calls_candidates = ["calls", "total_calls", "num_calls", "count"]
-    credits_candidates = [
-        "credits",
-        "credits_consumed",
-        "total_credits",
-        "cost_credits",
-    ]
-    duration_candidates = [
-        "duration_secs",
-        "total_duration_secs",
-        "seconds",
-        "duration_seconds",
-        "call_duration_seconds",
-    ]
-
-    calls = 0
-    for k in calls_candidates:
-        if k in d:
-            calls = _to_int(d.get(k), 0)
-            break
-
-    credits = 0.0
-    for k in credits_candidates:
-        if k in d:
-            credits = _to_float(d.get(k), 0.0)
-            break
-
-    duration = 0.0
-    for k in duration_candidates:
-        if k in d:
-            duration = _to_float(d.get(k), 0.0)
-            break
-
-    return {"calls": calls, "credits": credits, "duration_secs": duration}
-
-
-def _sum_from_buckets(buckets: List[Dict[str, Any]]) -> Dict[str, Any]:
-    calls = 0
-    credits = 0.0
-    dur_s = 0.0
-    for row in buckets:
-        if not isinstance(row, dict):
-            continue
-        calls += _to_int(row.get("calls") or row.get("total_calls") or row.get("count"), 0)
-        credits += _to_float(
-            row.get("credits")
-            or row.get("total_credits")
-            or row.get("credits_consumed")
-            or row.get("cost_credits"),
-            0.0,
-        )
-        dur_s += _to_float(
-            row.get("duration_secs")
-            or row.get("total_duration_secs")
-            or row.get("seconds")
-            or row.get("duration_seconds")
-            or row.get("call_duration_seconds"),
-            0.0,
-        )
-    return {"calls": calls, "credits": credits, "duration_secs": dur_s}
-
-
-def _fallback_conversations(
-    agent_id: str, start_unix_ts: int, end_unix_ts: int
-) -> Dict[str, Any]:
-    """
-    Fallback robusto contra /v1/convai/conversations con paginación por cursor.
-    Suma llamadas, créditos y duración.
-    """
-    url = (
+    base_query = (
         f"{BASE_URL}/v1/convai/conversations"
         f"?agent_id={agent_id}"
         f"&call_start_after_unix={start_unix_ts}"
@@ -191,139 +89,76 @@ def _fallback_conversations(
     total_credits = 0.0
     total_duration = 0.0
 
-    next_url = url
-    tries = 0
+    next_url = base_query
+    page = 0
 
-    while next_url and tries < 50:  # límite de seguridad
-        tries += 1
+    while next_url and page < 100:  # límite duro
+        page += 1
         status, data, err = _http("GET", next_url, None)
-        if not (200 <= status < 300) or not isinstance(data, dict):
-            # Si falla, corta y devuelve lo acumulado (mejor que 0)
+        print(f"[metrics-fallback] GET {next_url} -> status={status} err={err}")
+        if not (200 <= status < 300) or not isinstance(data, (dict, list)):
             break
 
-        # Estructuras posibles: {conversations: [...], next_cursor: "..."} o {data: {...}}
-        conversations = []
-        if "conversations" in data and isinstance(data["conversations"], list):
-            conversations = data["conversations"]
-        elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("conversations"), list):
-            conversations = data["data"]["conversations"]
+        # Posibles estructuras
+        conversations: List[Dict[str, Any]] = []
+        if isinstance(data, dict):
+            if isinstance(data.get("conversations"), list):
+                conversations = data["conversations"]
+            elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("conversations"), list):
+                conversations = data["data"]["conversations"]
         elif isinstance(data, list):
-            conversations = data  # por si alguna vez devuelve lista directa
+            conversations = data
 
         for conv in conversations:
-            if not isinstance(conv, dict):
-                continue
-            # contar 1 por conversación
+            if not isinstance(conv, dict): continue
             total_calls += 1
-
-            # candidatos de créditos por conversación
-            credits = (
-                conv.get("credits")
-                or conv.get("credits_consumed")
-                or conv.get("total_credits")
-                or conv.get("cost_credits")
-                or 0.0
-            )
-            total_credits += _to_float(credits, 0.0)
-
-            # candidatos de duración por conversación
-            dur = (
-                conv.get("duration_secs")
-                or conv.get("duration_seconds")
-                or conv.get("total_duration_secs")
-                or conv.get("seconds")
-                or conv.get("call_duration_seconds")
-                or 0.0
-            )
+            # nombres de crédito posibles
+            cr = (conv.get("credits") or conv.get("credits_consumed")
+                  or conv.get("total_credits") or conv.get("cost_credits") or 0.0)
+            total_credits += _to_float(cr, 0.0)
+            # nombres de duración posibles
+            dur = (conv.get("duration_secs") or conv.get("duration_seconds")
+                   or conv.get("total_duration_secs") or conv.get("seconds")
+                   or conv.get("call_duration_seconds") or 0.0)
             total_duration += _to_float(dur, 0.0)
 
-        # cursor / next link
-        cursor = (
-            data.get("next_cursor")
-            or (data.get("data", {}).get("next_cursor") if isinstance(data.get("data"), dict) else None)
-        )
+        cursor = None
+        if isinstance(data, dict):
+            cursor = data.get("next_cursor")
+            if not cursor and isinstance(data.get("data"), dict):
+                cursor = data["data"].get("next_cursor")
+
         if cursor:
-            # Reaprovechamos la misma query con cursor
-            next_url = url + f"&cursor={requests.utils.quote(cursor)}"
+            next_url = base_query + f"&cursor={requests.utils.quote(cursor)}"
         else:
             next_url = None
 
     return {"ok": True, "data": {"calls": total_calls, "credits": total_credits, "duration_secs": total_duration}}
 
-
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    Estrategia:
-      1) Intentar el endpoint histórico (si tu tenant lo tiene): POST /v1/convai/analytics/agent
-      2) Si 404/410 -> fallback a /v1/convai/conversations con paginación y agregación.
+    Siempre usa el fallback /v1/convai/conversations para tu tenant (analytics devuelve 404).
     """
-    # --------- Paso 1: endpoint analytics clásico ----------
-    url = f"{BASE_URL}/v1/convai/analytics/agent"
-    payload = {"agent_id": agent_id, "start_unix_ts": start_unix_ts, "end_unix_ts": end_unix_ts}
-
-    delay = 1.0
-    for attempt in range(1, MAX_RETRIES + 1):
-        status, data, err = _http("POST", url, payload)
-        print(f"[metrics] POST {url} -> status={status} err={err}")
-        if err:
-            if attempt >= MAX_RETRIES:
-                break
-            time.sleep(delay); delay *= RETRY_BACKOFF
-            continue
-
-        # Si existe y responde 2xx
-        if 200 <= status < 300:
-            if isinstance(data, list):
-                return {"ok": True, "data": _sum_from_buckets(data)}
-            if isinstance(data, dict):
-                return {"ok": True, "data": _normalize_metrics(data)}
-            # Respuesta extraña: cae a fallback
-            break
-
-        # Si 404/410, cortamos bucle y vamos a fallback
-        if status in (404, 410):
-            break
-
-        # Si es retryable, reintenta; de lo contrario corta a fallback
-        if _retryable(status):
-            if attempt >= MAX_RETRIES:
-                break
-            time.sleep(delay); delay *= RETRY_BACKOFF
-            continue
-        else:
-            break
-
-    # --------- Paso 2: fallback conversations ----------
-    return _fallback_conversations(agent_id, start_unix_ts, end_unix_ts)
-
+    try:
+        return _fallback_conversations(agent_id, start_unix_ts, end_unix_ts)
+    except Exception as e:
+        return {"ok": False, "error": f"metrics-error: {e}"}
 
 # ===============================
-# Outbound (lote) – se mantiene
+# Outbound (lote) — sin cambios funcionales
 # ===============================
 def _build_dynamic_variables(recipient: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mantiene todas las variables (name, last_name, etc.) en minúsculas tal como
-    las espera el agente en ElevenLabs.
-    """
     dyn: Dict[str, Any] = {}
     for k, v in recipient.items():
-        if k == "phone_number":
-            continue
-        if v is None:
-            continue
+        if k == "phone_number": continue
+        if v is None: continue
         sv = str(v).strip()
-        if not sv:
-            continue
+        if not sv: continue
         dyn[k] = sv
     return dyn
 
-
-def _post_outbound_call(
-    agent_id: str,
-    phone_number_id: str,
-    to_number: str,
-    dynamic_variables: Dict[str, Any],
-) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
+def _post_outbound_call(agent_id: str, phone_number_id: str, to_number: str,
+                        dynamic_variables: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], int]:
     url = f"{BASE_URL}/v1/convai/twilio/outbound-call"
     payload = {
         "agent_id": agent_id,
@@ -331,61 +166,41 @@ def _post_outbound_call(
         "to_number": to_number,
         "conversation_initiation_client_data": {
             "type": "conversation_initiation_client_data",
-            "dynamic_variables": dynamic_variables,
-        },
+            "dynamic_variables": dynamic_variables
+        }
     }
 
     delay = 1.0
     for attempt in range(1, MAX_RETRIES + 1):
         status, data, err = _http("POST", url, payload)
         if err:
-            if attempt >= MAX_RETRIES:
-                return False, None, f"HTTP error: {err}", 0
-            time.sleep(delay); delay *= RETRY_BACKOFF
-            continue
+            if attempt >= MAX_RETRIES: return False, None, f"HTTP error: {err}", 0
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
         if 200 <= status < 300:
             return True, (data if isinstance(data, dict) else {"raw": data}), None, status
         if _retryable(status):
-            if attempt >= MAX_RETRIES:
-                return False, data, f"ElevenLabs error {status}: {data}", status
-            time.sleep(delay); delay *= RETRY_BACKOFF
-            continue
+            if attempt >= MAX_RETRIES: return False, data, f"ElevenLabs error {status}: {data}", status
+            time.sleep(delay); delay *= RETRY_BACKOFF; continue
         return False, data, f"ElevenLabs error {status}: {data}", status
 
     return False, None, "Unknown error", 0
 
-
-def start_batch_call(
-    call_name: str,
-    agent_id: str,
-    phone_number_id: str,
-    recipients_json: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """
-    Lanza llamadas salientes una por una.
-    """
+def start_batch_call(call_name: str, agent_id: str, phone_number_id: str,
+                     recipients_json: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(recipients_json, list):
         return {"ok": False, "error": "Parámetro recipients_json debe ser lista."}
     if not agent_id or not phone_number_id:
         return {"ok": False, "error": "Faltan agent_id o phone_number_id."}
 
-    total = len(recipients_json)
-    sent = 0
-    failed = 0
-    failures: List[Dict[str, Any]] = []
-    responses_sample: List[Any] = []
+    total = len(recipients_json); sent = 0; failed = 0
+    failures: List[Dict[str, Any]] = []; responses_sample: List[Any] = []
     per_call_sleep = float(os.getenv("ELEVENLABS_BATCH_SLEEP", "0.0"))
 
     for idx, r in enumerate(recipients_json, start=1):
-        to = str(r.get("phone_number", "")).strip()
+        to = str(r.get("phone_number","")).strip()
         if not to:
             failed += 1
-            failures.append({
-                "phone_number": "",
-                "error": "Fila sin phone_number",
-                "status": 0,
-                "payload_sample": r,
-            })
+            failures.append({"phone_number":"","error":"Fila sin phone_number","status":0,"payload_sample":r})
             continue
 
         dyn = _build_dynamic_variables(r)  # mantiene name, last_name, etc.
@@ -400,7 +215,7 @@ def start_batch_call(
                 "phone_number": to,
                 "error": err or "error_desconocido",
                 "status": status,
-                "payload_sample": {"dynamic_variables": dyn},
+                "payload_sample": {"dynamic_variables": dyn}
             })
 
         if per_call_sleep and idx < total:
@@ -414,6 +229,6 @@ def start_batch_call(
             "sent": sent,
             "failed": failed,
             "failures": failures,
-            "responses_sample": responses_sample,
-        },
+            "responses_sample": responses_sample
+        }
     }
