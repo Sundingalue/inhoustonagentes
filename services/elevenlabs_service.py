@@ -13,7 +13,7 @@ DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
 RETRY_BACKOFF   = 1.5
 
-# ratio USD/Crédito (para derivar créditos desde USD si hace falta)
+# Ratio USD/Crédito (si sólo viene USD)
 USD_PER_CREDIT = float(os.getenv("ELEVENLABS_USD_PER_CREDIT", "0.0001") or 0.0001)
 
 
@@ -129,11 +129,7 @@ def _normalize_metrics(payload: Any) -> Dict[str, Any]:
     calls   = d.get("calls", d.get("total_calls", d.get("outbound_calls", 0)))
     credits = d.get("credits", d.get("total_credits", d.get("credits_consumed", 0.0)))
     dur_s   = d.get("duration_secs", d.get("total_duration_secs", d.get("seconds", 0.0)))
-    return {
-        "calls": _safe_int(calls),
-        "credits": _safe_float(credits),
-        "duration_secs": _safe_float(dur_s),
-    }
+    return {"calls": _safe_int(calls), "credits": _safe_float(credits), "duration_secs": _safe_float(dur_s)}
 
 
 def _extract_items(payload: Any) -> List[Dict[str, Any]]:
@@ -149,6 +145,24 @@ def _extract_items(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _find_first_numeric_by_keys(obj: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    for k in keys:
+        if k in obj and obj[k] is not None:
+            return _safe_float(obj[k])
+    return None
+
+
+def _find_numeric_contains(obj: Dict[str, Any], needle: str) -> Optional[float]:
+    """
+    Busca en el nivel actual cualquier clave que contenga 'needle' (case-insensitive) y sea numérica.
+    """
+    n = needle.lower()
+    for k, v in obj.items():
+        if isinstance(v, (int, float)) and n in str(k).lower():
+            return _safe_float(v)
+    return None
+
+
 def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
     """
     Suma una página de conversaciones.
@@ -160,52 +174,76 @@ def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
     dur_s = 0.0
 
     items = _extract_items(payload)
+    print(f"[metrics-fallback] page_items={len(items)}")
+
     for c in items:
         if not isinstance(c, dict):
             continue
         calls += 1
 
         # -------- créditos ----------
-        # candidatos directos
-        cr_candidates = (
-            c.get("credits"),
-            c.get("credits_consumed"),
-            c.get("billable_credits"),
-            c.get("usage_credits"),
-            c.get("cost_credits"),
-            (c.get("usage") or {}).get("credits") if isinstance(c.get("usage"), dict) else None,
-        )
-        cr = next((v for v in cr_candidates if v is not None), None)
+        # candidatos directos en top-level
+        cr_candidates = [
+            "credits", "credits_consumed", "billable_credits", "usage_credits",
+            "cost_credits", "total_credits"
+        ]
+        cr = _find_first_numeric_by_keys(c, cr_candidates)
+
+        # usage.*, billing.*, pricing.*
+        if cr is None and isinstance(c.get("usage"), dict):
+            cr = _find_first_numeric_by_keys(c["usage"], ["credits"])
+        if cr is None and isinstance(c.get("billing"), dict):
+            cr = _find_first_numeric_by_keys(c["billing"], ["credits"])
+        if cr is None and isinstance(c.get("pricing"), dict):
+            cr = _find_first_numeric_by_keys(c["pricing"], ["credits"])
+
+        # cualquier clave que contenga "credit"
         if cr is None:
-            # derivar desde USD si está
-            usd = (
-                c.get("usd_spent") or c.get("cost_usd") or c.get("total_cost_usd")
-                or ( (c.get("usage") or {}).get("usd") if isinstance(c.get("usage"), dict) else None )
-            )
+            cr = _find_numeric_contains(c, "credit")
+
+        # derivar desde USD si hace falta
+        if cr is None:
+            usd = None
+            usd = usd or _find_first_numeric_by_keys(c, ["usd_spent", "cost_usd", "total_cost_usd"])
+            if isinstance(c.get("usage"), dict):
+                usd = usd or _find_first_numeric_by_keys(c["usage"], ["usd", "cost_usd"])
+            if isinstance(c.get("billing"), dict):
+                usd = usd or _find_first_numeric_by_keys(c["billing"], ["usd", "total_usd", "cost_usd"])
+            if isinstance(c.get("pricing"), dict):
+                usd = usd or _find_first_numeric_by_keys(c["pricing"], ["usd"])
+            if usd is None:
+                # cualquier clave que contenga "usd"
+                usd = _find_numeric_contains(c, "usd")
             if usd is not None:
                 cr = _safe_float(usd) / USD_PER_CREDIT
+
         credits += _safe_float(cr, 0.0)
 
         # -------- duración ----------
-        dur_candidates = (
-            c.get("duration_secs"),
-            c.get("duration_seconds"),
-            c.get("call_duration_seconds"),
-            c.get("seconds"),
+        dsec: Optional[float] = None
+        dsec = dsec or _find_first_numeric_by_keys(
+            c,
+            ["duration_secs", "duration_seconds", "call_duration_seconds", "seconds", "total_duration_seconds"]
         )
-        dsec = next((_safe_float(v) for v in dur_candidates if v is not None), None)
+        if dsec is None and "duration_ms" in c:
+            dsec = _safe_float(c.get("duration_ms")) / 1000.0
+
         if dsec is None:
-            ms = c.get("duration_ms")
-            if ms is not None:
-                dsec = _safe_float(ms) / 1000.0
-        if dsec is None:
-            start_ts = c.get("call_start_unix") or c.get("start_unix")
-            end_ts   = c.get("call_end_unix")   or c.get("end_unix")
+            # calcular con UNIX
+            start_ts = (
+                c.get("call_start_unix") or c.get("start_unix") or
+                c.get("started_at_unix") or c.get("start_time_unix")
+            )
+            end_ts = (
+                c.get("call_end_unix") or c.get("end_unix") or
+                c.get("ended_at_unix") or c.get("end_time_unix")
+            )
             if start_ts and end_ts:
                 dsec = max(0.0, _safe_float(end_ts) - _safe_float(start_ts))
             else:
                 dsec = 0.0
-        dur_s += dsec
+
+        dur_s += _safe_float(dsec, 0.0)
 
     return {"calls": calls, "credits": credits, "duration_secs": dur_s}
 
@@ -229,11 +267,7 @@ def _try_metrics_variant(method: str, url: str, json_body: Optional[Dict[str, An
 def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
     Recorre TODAS las páginas de /v1/convai/conversations sumando métricas.
-    Soporta:
-      - next (URL completa)
-      - next_page_token / nextToken / pageToken
-      - cursor / next_cursor + has_more
-      - offset/limit
+    Soporta: next, next_page_token, nextToken, pageToken, cursor/next_cursor, has_more, offset/limit
     """
     base_url = f"{BASE_URL}/v1/convai/conversations"
     limit = 200
@@ -257,7 +291,7 @@ def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int)
     cursor: Optional[str] = None
     offset: int = 0
 
-    while pages < 100:  # tope de seguridad
+    while pages < 200:  # tope de seguridad
         page_params = dict(params)
         if next_token:
             page_params["page_token"] = next_token
@@ -277,6 +311,7 @@ def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int)
         total_credits += norm["credits"]
         total_secs    += norm["duration_secs"]
         pages += 1
+        print(f"[metrics-fallback] partial_sum calls={total_calls} credits={total_credits} secs={total_secs} pages={pages}")
 
         # detectar siguiente página
         next_url = None
@@ -446,23 +481,4 @@ def start_batch_call(
         else:
             failed += 1
             failures.append({
-                "phone_number": to,
-                "error": err or "error_desconocido",
-                "status": status,
-                "payload_sample": {"dynamic_variables": dyn},
-            })
-
-        if per_call_sleep and idx < total:
-            time.sleep(per_call_sleep)
-
-    return {
-        "ok": True,
-        "data": {
-            "batch_name": call_name,
-            "total": total,
-            "sent": sent,
-            "failed": failed,
-            "failures": failures,
-            "responses_sample": responses_sample,
-        },
-    }
+                "
