@@ -13,6 +13,9 @@ DEFAULT_TIMEOUT = 30
 MAX_RETRIES     = 3
 RETRY_BACKOFF   = 1.5
 
+# ratio USD/Crédito (para derivar créditos desde USD si hace falta)
+USD_PER_CREDIT = float(os.getenv("ELEVENLABS_USD_PER_CREDIT", "0.0001") or 0.0001)
+
 
 # =========================
 # HTTP helpers
@@ -37,18 +40,10 @@ def _http(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Tuple[int, Any, Optional[str], Dict[str, Any]]:
-    """
-    Devuelve (status, data, err, meta)
-    meta = {"url": url_final, "ct": content-type}
-    """
     try:
         resp = requests.request(
-            method=method,
-            url=url,
-            json=json_body,
-            params=params,
-            headers=_auth_headers(),
-            timeout=timeout,
+            method=method, url=url, json=json_body, params=params,
+            headers=_auth_headers(), timeout=timeout
         )
         ct = (resp.headers.get("Content-Type") or "").lower()
         data = resp.json() if "application/json" in ct else resp.text
@@ -104,7 +99,7 @@ def _safe_int(x: Any, default: int = 0) -> int:
 
 def _normalize_metrics(payload: Any) -> Dict[str, Any]:
     """
-    Normaliza a {calls, credits, duration_secs} tolerando dict/list y envolturas {data}, {analytics}.
+    Normaliza a {calls, credits, duration_secs} tolerando dict/list.
     """
     if payload is None:
         return {"calls": 0, "credits": 0.0, "duration_secs": 0.0}
@@ -118,7 +113,7 @@ def _normalize_metrics(payload: Any) -> Dict[str, Any]:
             if not isinstance(row, dict):
                 continue
             calls   += _safe_int(row.get("calls") or row.get("total_calls") or 0)
-            credits += _safe_float(row.get("credits") or row.get("total_credits") or row.get("credits_consumed") or 0.0)
+            credits += _safe_float(row.get("credits") or row.get("credits_consumed") or row.get("total_credits") or 0.0)
             dur_s   += _safe_float(row.get("duration_secs") or row.get("total_duration_secs") or row.get("seconds") or 0.0)
         return {"calls": calls, "credits": credits, "duration_secs": dur_s}
 
@@ -141,19 +136,14 @@ def _normalize_metrics(payload: Any) -> Dict[str, Any]:
     }
 
 
-def _extract_conversation_items(payload: Any) -> List[Dict[str, Any]]:
+def _extract_items(payload: Any) -> List[Dict[str, Any]]:
     """
-    Devuelve la lista de conversaciones sin importar la clave que use la API.
+    Devuelve lista de conversaciones sin importar la clave.
     """
     if isinstance(payload, dict):
-        if isinstance(payload.get("data"), list):
-            return payload["data"]
-        if isinstance(payload.get("conversations"), list):
-            return payload["conversations"]
-        if isinstance(payload.get("items"), list):
-            return payload["items"]
-        if isinstance(payload.get("results"), list):
-            return payload["results"]
+        for key in ("data", "conversations", "items", "results"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
     if isinstance(payload, list):
         return payload
     return []
@@ -161,30 +151,42 @@ def _extract_conversation_items(payload: Any) -> List[Dict[str, Any]]:
 
 def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
     """
-    Suma conversaciones de una página.
-    Intenta varias claves para créditos y duración.
+    Suma una página de conversaciones.
+    - Créditos: múltiples claves + derivación desde USD si existe.
+    - Duración: segundos / ms / (end-start).
     """
     calls = 0
     credits = 0.0
     dur_s = 0.0
-    items = _extract_conversation_items(payload)
 
+    items = _extract_items(payload)
     for c in items:
         if not isinstance(c, dict):
             continue
         calls += 1
 
-        # créditos
+        # -------- créditos ----------
+        # candidatos directos
         cr_candidates = (
             c.get("credits"),
             c.get("credits_consumed"),
+            c.get("billable_credits"),
             c.get("usage_credits"),
             c.get("cost_credits"),
             (c.get("usage") or {}).get("credits") if isinstance(c.get("usage"), dict) else None,
         )
-        credits += next((_safe_float(v) for v in cr_candidates if v is not None), 0.0)
+        cr = next((v for v in cr_candidates if v is not None), None)
+        if cr is None:
+            # derivar desde USD si está
+            usd = (
+                c.get("usd_spent") or c.get("cost_usd") or c.get("total_cost_usd")
+                or ( (c.get("usage") or {}).get("usd") if isinstance(c.get("usage"), dict) else None )
+            )
+            if usd is not None:
+                cr = _safe_float(usd) / USD_PER_CREDIT
+        credits += _safe_float(cr, 0.0)
 
-        # duración
+        # -------- duración ----------
         dur_candidates = (
             c.get("duration_secs"),
             c.get("duration_seconds"),
@@ -192,6 +194,10 @@ def _normalize_conversations_list(payload: Any) -> Dict[str, Any]:
             c.get("seconds"),
         )
         dsec = next((_safe_float(v) for v in dur_candidates if v is not None), None)
+        if dsec is None:
+            ms = c.get("duration_ms")
+            if ms is not None:
+                dsec = _safe_float(ms) / 1000.0
         if dsec is None:
             start_ts = c.get("call_start_unix") or c.get("start_unix")
             end_ts   = c.get("call_end_unix")   or c.get("end_unix")
@@ -223,16 +229,17 @@ def _try_metrics_variant(method: str, url: str, json_body: Optional[Dict[str, An
 def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
     Recorre TODAS las páginas de /v1/convai/conversations sumando métricas.
-    Detecta varios esquemas:
-      - 'next' como URL completa
-      - 'next_page_token' / 'nextToken' -> se envía como 'page_token' y 'next_page_token'
-      - Si la página viene llena (len == limit), avanza por 'offset'
+    Soporta:
+      - next (URL completa)
+      - next_page_token / nextToken / pageToken
+      - cursor / next_cursor + has_more
+      - offset/limit
     """
     base_url = f"{BASE_URL}/v1/convai/conversations"
-    limit = 200  # tamaño de página
+    limit = 200
+
     params: Dict[str, Any] = {
         "agent_id": agent_id,
-        # La API acepta cualquiera de estos pares; enviamos todos para cubrir variaciones
         "call_start_after_unix":  start_unix_ts,
         "call_start_before_unix": end_unix_ts,
         "start_unix": start_unix_ts,
@@ -247,14 +254,16 @@ def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int)
 
     url = base_url
     next_token: Optional[str] = None
+    cursor: Optional[str] = None
     offset: int = 0
 
-    while pages < 60:
-        # aplicar token u offset si los hay
-        page_params = dict(params)  # copia
+    while pages < 100:  # tope de seguridad
+        page_params = dict(params)
         if next_token:
             page_params["page_token"] = next_token
             page_params["next_page_token"] = next_token
+        if cursor:
+            page_params["cursor"] = cursor
         if offset:
             page_params["offset"] = offset
 
@@ -269,34 +278,39 @@ def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int)
         total_secs    += norm["duration_secs"]
         pages += 1
 
-        # detectar siguiente
+        # detectar siguiente página
         next_url = None
         next_token = None
+        cursor = None
+        has_more = False
 
         if isinstance(data, dict):
-            # 1) next como URL completa
+            # 1) URL absoluta en 'next'
             if isinstance(data.get("next"), str) and data["next"]:
                 next_url = data["next"]
 
-            # 2) tokens
+            # 2) token/cursor
             next_token = data.get("next_page_token") or data.get("nextToken") or data.get("pageToken")
+            cursor     = data.get("next_cursor") or data.get("cursor")
+            has_more   = bool(data.get("has_more"))
 
-        items = _extract_conversation_items(data)
+        items = _extract_items(data)
         filled_page = len(items) >= limit
 
         if next_url:
-            # usamos la URL tal cual (con sus query params)
             url = next_url
-            # si viene absoluta, no pasamos params adicionales
             params = {}
+            offset = 0
+            continue
+        elif cursor:
+            url = base_url
             offset = 0
             continue
         elif next_token:
             url = base_url
             offset = 0
             continue
-        elif filled_page:
-            # fallback por offset
+        elif has_more or filled_page:
             url = base_url
             offset += limit
             continue
@@ -308,8 +322,8 @@ def _paginate_conversations(agent_id: str, start_unix_ts: int, end_unix_ts: int)
 
 def get_agent_consumption_data(agent_id: str, start_unix_ts: int, end_unix_ts: int) -> Dict[str, Any]:
     """
-    1) Intenta endpoint legacy /v1/convai/analytics/agent (si existe).
-    2) Si 404, usa fallback: /v1/convai/conversations + paginación.
+    1) Intenta /v1/convai/analytics/agent (legacy).
+    2) Si 404, usa fallback: /v1/convai/conversations con paginación.
     """
     base = f"{BASE_URL}/v1/convai/analytics/agent"
     variants = [
