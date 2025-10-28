@@ -10,6 +10,11 @@ from typing import Any, Dict, Optional, List
 from datetime import datetime, timedelta
 
 import pandas as pd
+import bcrypt
+
+# --- AÑADIDO: Imports del código antiguo ---
+from twilio.rest import Client
+# ------------------------------------------
 
 # Servicios ElevenLabs (sin tocar envs ni rutas raras)
 from services.elevenlabs_service import (
@@ -18,6 +23,11 @@ from services.elevenlabs_service import (
     get_agent_consumption_data,
     start_batch_call
 )
+
+# --- AÑADIDO: Imports de agendamiento del código antiguo ---
+from services.calendar_checker import check_availability
+from services.calendar_service import book_appointment
+# ---------------------------------------------------------
 
 # --------- Carga .env (local o /etc/secrets) ----------
 from dotenv import load_dotenv
@@ -58,6 +68,24 @@ def _verify_hmac(secret: str, body: bytes, sig_header: str) -> bool:
     expected_t_body = hmac.new(secret.encode(), f"{t}.{body_txt}".encode(), hashlib.sha256).hexdigest()
     expected_tbody  = hmac.new(secret.encode(), f"{t}{body_txt}".encode(), hashlib.sha256).hexdigest()
     return v0 in (expected_body, expected_t_body, expected_tbody)
+
+# --- AÑADIDO: Config Twilio (SMS) del código antiguo ---
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
+twilio_client = None
+twilio_configurado = False
+
+if all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+    try:
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio_configurado = True
+        print("✅ Cliente de Twilio configurado exitosamente.")
+    except Exception as e:
+        print(f"⚠️  ADVERTENCIA: Error al configurar cliente de Twilio: {e}")
+else:
+    print("⚠️  ADVERTENCIA: Faltan variables de entorno de Twilio. El SMS no funcionará.")
+# ----------------------------------------------------
 
 # --------- Mapeos de archivos de agentes (configs JSON en /agents) ----------
 BOT_CONFIG_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'agents'))
@@ -165,7 +193,11 @@ async def handle_agent_event(request: Request, elevenlabs_signature: str = Heade
         config_filename = map_agent_id_to_filename(agent_id)
         if not config_filename:
             raise HTTPException(status_code=404, detail=f"Config no encontrada para ID: {agent_id}")
-        # Aquí podrías llamar a tu processor si lo usas.
+        
+        # (Este es el comportamiento de tu CÓDIGO NUEVO. 
+        # Si aquí necesitas llamar a 'process_agent_event' como en el CÓDIGO ANTIGUO,
+        # deberás añadir ese import y la llamada aquí)
+        
         return JSONResponse(status_code=200, content={"status": "ok"})
     except HTTPException as http_err:
         return JSONResponse(status_code=http_err.status_code, content={"error": http_err.detail})
@@ -177,11 +209,138 @@ async def handle_agent_event(request: Request, elevenlabs_signature: str = Heade
 # ---------- Health/env ----------
 @app.get("/_envcheck")
 def envcheck():
-    keys = ["ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC","XI_API_KEY","ELEVENLABS_API_KEY"]
+    # FUSIÓN: Se incluyen las variables de MAIL (del código antiguo) y las de API (del nuevo)
+    keys = [
+        "MAIL_FROM","MAIL_USERNAME","MAIL_PASSWORD","MAIL_HOST","MAIL_PORT",
+        "ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC","XI_API_KEY","ELEVENLABS_API_KEY"
+    ]
     return {k: os.getenv(k) for k in keys}
 
+
 # =================================================================
-# === PANEL AGENTES: AUTH & MÉTRICAS ==============================
+# === AÑADIDO: LÓGICA DE AGENDAMIENTO (DEL CÓDIGO ANTIGUO) ========
+# =================================================================
+
+# Definición de la estructura de datos que esperamos para agendar
+class CitaPayload(dict):
+    """
+    Clase simple para validar la estructura del JSON de entrada.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Aseguramos que los campos requeridos existen
+        required_keys = ["cliente_nombre", "fecha", "hora", "telefono"]
+        if not all(k in self for k in required_keys):
+            raise ValueError(f"Payload missing one of required keys: {required_keys}")
+
+@app.post("/agendar_cita")
+async def agendar_cita_endpoint(request: Request):
+    """
+    Endpoint que coordina la verificación de disponibilidad y la creación del evento.
+    """
+    try:
+        # 1. Cargar y validar el JSON de la solicitud (Payload)
+        try:
+            payload = CitaPayload(await request.json())
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON format.")
+
+        cliente_nombre = payload['cliente_nombre']
+        fecha_str = payload['fecha']
+        hora_str = payload['hora']
+        cliente_telefono = payload.get('telefono') # Ya validado por CitaPayload
+
+        # 2. Verificar Disponibilidad (Usando services/calendar_checker.py)
+        print(f"🔄 Verificando disponibilidad para {cliente_nombre} en {fecha_str} a las {hora_str}...")
+
+        is_available = check_availability(fecha_str, hora_str)
+
+        if not is_available:
+            return JSONResponse(
+                status_code=409, # 409 Conflict - Recurso no disponible
+                content={
+                    "status": "failure",
+                    "message": f"Horario no disponible: {fecha_str} a las {hora_str}.",
+                }
+            )
+
+        # 3. Agendar Cita y Guardar Datos (Usando services/calendar_service.py - Webhook de Apps Script)
+        print("✅ Disponible. Procediendo a agendar el evento mediante Apps Script Webhook...")
+
+        book_result = book_appointment(
+            nombre=cliente_nombre,
+            apellido="N/A",         # Placeholder
+            telefono=cliente_telefono, # Usamos el teléfono del payload
+            email="test@webhook.com", # Placeholder
+            fechaCita=fecha_str,
+            horaCita=hora_str
+        )
+
+        # 4. Analizar la Respuesta del Webhook de Apps Script
+        if book_result.get('status') == 'success':
+            success_message = f"Cita agendada con éxito para {cliente_nombre}. Mensaje de Apps Script: {book_result.get('message', 'Éxito.')}"
+            print(f"🎉 Éxito: {success_message}")
+
+            # --- INICIO: Enviar SMS de Confirmación con Twilio ---
+            if twilio_configurado:
+                try:
+                    if cliente_telefono: # Ya sabemos que existe
+                        mensaje_sms = (
+                            f"In Houston Texas: Hola {cliente_nombre}. "
+                            f"Le confirmamos su cita para el {fecha_str} a las {hora_str}."
+                        )
+
+                        print(f"🔄 Enviando SMS de confirmación a {cliente_telefono}...")
+                        message = twilio_client.messages.create(
+                            body=mensaje_sms,
+                            from_=TWILIO_PHONE_NUMBER,
+                            to=cliente_telefono
+                        )
+                        print(f"✅ SMS enviado exitosamente. SID: {message.sid}")
+                    else:
+                        print("⚠️ No se encontró 'telefono' en el payload, no se puede enviar SMS.")
+
+                except Exception as sms_error:
+                    # Importante: Si falla el SMS, no detenemos todo. Solo lo registramos.
+                    print(f"⚠️ Falló el envío de SMS, pero la cita FUE AGENDADA. Error: {sms_error}")
+            # --- FIN: Enviar SMS de Confirmación con Twilio ---
+
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "message": success_message,
+                    "webhook_status": "Llamada a Apps Script exitosa",
+                    "sheets_status": "Datos y cita guardados a través del Webhook de Apps Script."
+                }
+            )
+        else:
+             # Si el Apps Script falla o devuelve un error
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "failure",
+                    "message": "Fallo al agendar la cita en Google Calendar/Sheets a través del Webhook.",
+                    "details": book_result.get('message', 'Error desconocido del Webhook.')
+                }
+            )
+
+    except HTTPException as http_err:
+        return JSONResponse(status_code=http_err.status_code, content={"error": http_err.detail})
+    except Exception as e:
+        print(f"💥 Error grave en /agendar_cita: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(e)})
+
+# =================================================================
+# === FIN: LÓGICA DE AGENDAMIENTO =================================
+# =================================================================
+
+
+# =================================================================
+# === PANEL AGENTES: AUTH & MÉTRICAS (Versión limpia del código nuevo)
 # =================================================================
 AGENT_JWT_SECRET = (os.getenv("AGENT_JWT_SECRET") or HMAC_SECRET)
 if not AGENT_JWT_SECRET:
@@ -258,8 +417,6 @@ async def admin_sync_numbers():
     return JSONResponse({"ok": True, "data": l})
 
 # --------- Login del agente (para shortcode WP) ----------
-import bcrypt
-
 @app.post("/agent/login", response_model=Token)
 async def agent_login(form_data: OAuth2PasswordRequestForm = Depends()):
     un = form_data.username
@@ -325,7 +482,7 @@ async def get_agent_data(req: AgentDataRequest, agent: AgentData = Depends(get_c
     }
     return JSONResponse({"ok": True, "data": final})
 
-# --------- Llamada por lotes (WP) ----------
+# --------- Llamada por lotes (WP) (Versión mejorada del código nuevo) ----------
 @app.post("/agent/start-batch-call")
 async def handle_batch_call(
     agent: AgentData = Depends(get_current_agent),
@@ -355,10 +512,7 @@ async def handle_batch_call(
     if not agent_id or not phone_number_id:
         raise HTTPException(400, "Faltan elevenlabs_agent_id o elevenlabs_phone_number_id en la config")
 
-    # --- Parse del archivo con pandas (igual que ya tenías) ---
-    import io, re
-    import pandas as pd
-
+    # --- Parse del archivo con pandas ---
     recipients = []
     try:
         content = await csv_file.read()
@@ -394,7 +548,7 @@ async def handle_batch_call(
 
             item = {"phone_number": phone}
 
-            # Mantén name / last_name en minúscula (como en tu Agente)
+            # Mantén name / last_name en minúscula
             for k, v in row.items():
                 if k == "phone_number":
                     continue
@@ -412,7 +566,6 @@ async def handle_batch_call(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(400, f"Error al procesar el archivo: {e}")
 
@@ -422,8 +575,6 @@ async def handle_batch_call(
     print(f"DEBUG outbound sample -> {recipients[0] if recipients else None}")
 
     # --- Llamada al servicio que ya tienes ---
-    from services.elevenlabs_service import start_batch_call
-
     result = start_batch_call(
         call_name=batch_name,
         agent_id=agent_id,
@@ -434,4 +585,3 @@ async def handle_batch_call(
         raise HTTPException(500, result.get("error", "Error desconocido"))
 
     return JSONResponse({"ok": True, "data": result["data"]})
-
