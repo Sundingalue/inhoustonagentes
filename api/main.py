@@ -1,6 +1,8 @@
+# main.py
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from workflows.processor import process_agent_event
@@ -14,6 +16,9 @@ import glob
 from datetime import datetime, timedelta
 import time
 import io
+import csv
+import re
+import pandas as pd  # Para soportar .xls/.xlsx además de .csv
 
 # Importar las funciones del servicio que acabamos de añadir
 from services.elevenlabs_service import (
@@ -48,9 +53,17 @@ else:
     print("⚠️ Usando .env local")
 
 # =========================
-# App
+# App (+ CORS)
 # =========================
 app = FastAPI()
+# 🔓 CORS abierto para facilitar conexión desde WordPress/otros orígenes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 print("✅ FastAPI cargado correctamente y esperando eventos de ElevenLabs…")
 
 # =========================
@@ -114,7 +127,11 @@ def map_agent_id_to_filename(agent_id: str) -> Optional[str]:
                 config: Dict[str, Any] = json.load(f)
 
                 # 3. Comprobar si el ID del agente de ElevenLabs coincide
-                if config.get("elevenlabs_agent_id") == agent_id:
+                if (
+                    config.get("elevenlabs_agent_id") == agent_id
+                    or config.get("agent_id") == agent_id
+                    or config.get("eleven_agent_id") == agent_id
+                ):
                     # 4. Encontramos la coincidencia, guardamos en caché y devolvemos
                     AGENT_ID_TO_FILENAME_CACHE[agent_id] = filename
                     print(f"✅ Mapeo encontrado: {agent_id} -> {filename}")
@@ -320,7 +337,9 @@ async def handle_agent_event(
 def envcheck():
     keys = [
         "MAIL_FROM","MAIL_USERNAME","MAIL_PASSWORD","MAIL_HOST","MAIL_PORT",
-        "ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC"
+        "ELEVENLABS_HMAC_SECRET","ELEVENLABS_SKIP_HMAC",
+        # Añadimos claves usadas por algunas librerías ElevenLabs
+        "XI_API_KEY","ELEVENLABS_API_KEY"
     ]
     return {k: os.getenv(k) for k in keys}
 
@@ -696,48 +715,115 @@ async def handle_batch_call(
     """
     Endpoint seguro para iniciar un lote de llamadas.
     Recibe un formulario 'multipart/form-data'.
+    Soporta .csv, .xls y .xlsx (con pandas).
+    Normaliza cabeceras y permite variables dinámicas (name, last_name, etc.).
     """
     bot_config = agent.config
 
-    if not csv_file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Se requiere un archivo .csv válido")
+    filename = (csv_file.filename or "").lower()
+    allowed_extensions = (".csv", ".xls", ".xlsx")
+    if not filename.endswith(allowed_extensions):
+        raise HTTPException(status_code=400, detail=f"Formato no soportado. Usa: {', '.join(allowed_extensions)}")
 
-    # 1. Leer la configuración del bot (para IDs)
-    agent_id = bot_config.get('elevenlabs_agent_id')
-    # 'eleven_phone_number_id' lo guardaremos en el JSON desde WordPress
-    phone_number_id = bot_config.get('eleven_phone_number_id')
+    # --- Claves robustas (acepta varias variantes) ---
+    agent_id = (
+        bot_config.get("elevenlabs_agent_id")
+        or bot_config.get("agent_id")
+        or bot_config.get("eleven_agent_id")
+    )
+    # WordPress puede guardar distintos nombres para el mismo dato
+    phone_number_id = (
+        bot_config.get("elevenlabs_phone_number_id")  # preferido por WP
+        or bot_config.get("eleven_phone_number_id")
+        or bot_config.get("phone_number_id")
+    )
 
     if not agent_id or not phone_number_id:
-        raise HTTPException(status_code=400, detail="Agente o número de teléfono no configurado")
+        raise HTTPException(status_code=400, detail="Faltan elevenlabs_agent_id o elevenlabs_phone_number_id en la config")
 
-    # 2. Procesar el CSV y convertirlo a JSON para la API
-    recipients = []
+    recipients: List[Dict[str, Any]] = []
+
     try:
-        # Leer el archivo CSV en memoria
-        csv_data = (await csv_file.read()).decode("utf-8")
-        csv_reader = csv.DictReader(io.StringIO(csv_data))
+        # Leemos todo el archivo a memoria
+        content = await csv_file.read()
+        file_like = io.BytesIO(content)
 
-        for row in csv_reader:
-            if 'phone_number' not in row:
-                raise HTTPException(status_code=400, detail="El CSV debe contener una columna 'phone_number'")
+        # Parse segun extensión
+        if filename.endswith(".csv"):
+            # Usamos pandas también para CSV para tener la misma normalización
+            df = pd.read_csv(file_like)
+        else:
+            df = pd.read_excel(file_like)
 
-            # (Aquí puedes añadir más variables dinámicas si las necesitas)
-            recipients.append({"phone_number": row['phone_number']})
+        # Normalizar headers: quitar signos, espacios->_, minúsculas
+        df.columns = [
+            re.sub(r"\s+", "_", re.sub(r"[^\w\s]", "", str(col))).lower()
+            for col in df.columns
+        ]
 
+        # Buscar/renombrar columna de teléfono
+        if "phone_number" not in df.columns:
+            for cand in ["telefono", "teléfono", "numero", "número", "phone", "celular"]:
+                if cand in df.columns:
+                    df.rename(columns={cand: "phone_number"}, inplace=True)
+                    break
+
+        if "phone_number" not in df.columns:
+            raise HTTPException(status_code=400, detail="El archivo debe contener una columna 'phone_number' (o similar)")
+
+        # Asegurar strings y sin NaN
+        df = df.astype(str).fillna("")
+        rows = df.to_dict(orient="records")
+
+        for row in rows:
+            phone = (row.get("phone_number") or "").strip()
+            if not phone:
+                continue
+
+            item: Dict[str, Any] = {"phone_number": phone}
+
+            # Mantener name/last_name y pasar el resto como variables dinámicas
+            for k, v in row.items():
+                if k == "phone_number":
+                    continue
+                key_clean = k.replace("_", "").lower()
+                if key_clean == "name":
+                    item["name"] = str(v).strip()
+                elif key_clean in ("lastname", "apellidos", "apellido"):
+                    item["last_name"] = str(v).strip()
+                else:
+                    item[key_clean] = str(v).strip()
+
+            recipients.append(item)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error procesando el CSV: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Error procesando el archivo: {e}")
 
     if not recipients:
-        raise HTTPException(status_code=400, detail="El CSV no contiene destinatarios")
+        raise HTTPException(status_code=400, detail="El archivo no contiene destinatarios válidos")
 
-    # 3. Enviar la petición a ElevenLabs
     print(f"Iniciando lote para {agent.bot_slug} (Agente ID: {agent_id})")
-    result = start_batch_call(batch_name, agent_id, phone_number_id, recipients)
+    print(f"DEBUG outbound sample -> {recipients[0] if recipients else None}")
 
-    if not result["ok"]:
-        raise HTTPException(status_code=500, detail=result["error"])
+    # 3. Enviar la petición a ElevenLabs (compatibilidad de firma)
+    try:
+        # Firma usada en tu segundo código
+        result = start_batch_call(
+            call_name=batch_name,
+            agent_id=agent_id,
+            phone_number_id=phone_number_id,
+            recipients_json=recipients,
+        )
+    except TypeError:
+        # Firma usada en tu primer código (posicional)
+        result = start_batch_call(batch_name, agent_id, phone_number_id, recipients)
 
-    # ¡Éxito!
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Error desconocido"))
+
     return JSONResponse(content={"ok": True, "data": result["data"]})
 
 # =================================================================
