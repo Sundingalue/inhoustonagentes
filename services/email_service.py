@@ -195,21 +195,25 @@ def _get_agent_name_from_config(agent_name_key: str) -> str:
     return (agent_name_key or "").capitalize() or "Agente"
 
 # =========================
-# Envío: SMTP y Zoho API (corregidos)
+# Envío: SMTP y Zoho API (corregidos y endurecidos)
 # =========================
 def _send_via_smtp(email_cfg: dict, email_content: Dict[str, str]) -> dict:
     smtp_host = os.getenv("MAIL_HOST", "smtp.zoho.com")
     smtp_port = int(os.getenv("MAIL_PORT", "587"))
+
+    # Buzón con el que AUTENTICAS
     username = (os.getenv("MAIL_USERNAME") or os.getenv("SMTP_USER") or "").strip()
     password = (os.getenv("MAIL_PASSWORD") or os.getenv("SMTP_PASSWORD") or "").strip()
 
-    # Forzamos From = username (la cuenta con la que te autenticas)
-    forced_from = username
+    # From efectivo (permite override explícito)
+    forced_from = (os.getenv("MAIL_FROM_OVERRIDE") or username).strip()
+
+    # El "from" del agente (JSON) se usa como Reply-To
     cfg_from = (email_cfg.get("from") or "").strip()
     reply_to = cfg_from if cfg_from and cfg_from.lower() != forced_from.lower() else None
 
     if not forced_from or not username or not password:
-        return {"status": "error", "message": "SMTP incompleto: MAIL_USERNAME/PASSWORD faltan"}
+        return {"status": "error", "message": "SMTP incompleto: MAIL_USERNAME/MAIL_PASSWORD faltan"}
 
     to_addr = email_cfg.get("to")
     subject = f"📞 Conversación {email_content['agent_name']} | Contacto: {email_content['caller_number']}"
@@ -225,15 +229,15 @@ def _send_via_smtp(email_cfg: dict, email_content: Dict[str, str]) -> dict:
     msg.attach(MIMEText(email_content["html"], "html", "utf-8"))
 
     try:
-        print(f"📡 Enviando SMTP (HTML) → {to_addr} ...  From={forced_from} Reply-To={reply_to}")
+        print(f"📡 SMTP → To={to_addr} | From={forced_from} | Reply-To={reply_to} | AuthUser={username}")
         with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
             server.starttls()
             server.login(username, password)
             server.send_message(msg)
-        print("✅ Correo SMTP (HTML) enviado correctamente.")
+        print("✅ SMTP OK")
         return {"status": "ok", "provider": "smtp", "to": to_addr, "subject": subject}
     except Exception as e:
-        print(f"❌ Error SMTP: {e}")
+        print(f"❌ SMTP FAIL: {e}")
         return {"status": "error", "provider": "smtp", "message": str(e)}
 
 def _zoho_headers(token: str) -> dict:
@@ -248,7 +252,12 @@ def _maybe_refresh_token() -> str:
     try:
         resp = requests.post(
             f"{ZOHO_API_DOMAIN}/oauth/v2/token",
-            data={"refresh_token": refresh, "client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token"},
+            data={
+                "refresh_token": refresh,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+            },
             timeout=10,
         )
         data = resp.json()
@@ -280,11 +289,13 @@ def _send_via_zoho_api(email_cfg: dict, email_content: Dict[str, str]) -> dict:
     if not token:
         return {"status": "error", "message": "ZOHO_ACCESS_TOKEN no configurado"}
 
-    acc_id = _get_zoho_account_id(token) or _maybe_refresh_token() or ""
+    acc_id = _get_zoho_account_id(token)
     if not acc_id:
-        return {"status": "error", "message": "No se pudo obtener account_id de Zoho"}
+        token = _maybe_refresh_token()
+        if not token:
+            return {"status": "error", "message": "No se pudo obtener account_id de Zoho"}
+        acc_id = _get_zoho_account_id(token)
 
-    # Forzar fromAddress a la cuenta del buzón (MAIL_USERNAME/MAIL_FROM)
     forced_from = (os.getenv("MAIL_USERNAME") or os.getenv("MAIL_FROM") or "").strip()
     cfg_from = (email_cfg.get("from") or "").strip()
     reply_to = cfg_from if cfg_from and cfg_from.lower() != forced_from.lower() else None
@@ -314,7 +325,7 @@ def _send_via_zoho_api(email_cfg: dict, email_content: Dict[str, str]) -> dict:
             print(f"❌ Error Zoho API {r.status_code}: {r.text[:200]}")
             return {"status": "error", "provider": "zoho_api", "message": f"HTTP {r.status_code}"}
 
-        print(f"✅ Correo enviado vía Zoho API (HTML) a {to_addr} From={forced_from} Reply-To={reply_to}")
+        print(f"✅ Zoho API OK → To={to_addr} | From={forced_from} | Reply-To={reply_to}")
         return {"status": "ok", "provider": "zoho_api", "to": to_addr, "subject": subject}
     except Exception as e:
         print(f"❌ Error general Zoho API: {e}")
